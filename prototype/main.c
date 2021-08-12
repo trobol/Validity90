@@ -183,6 +183,7 @@ void qread(byte * data, int len, int *out_len) {
     print_hex(data, *out_len);
 }
 
+
 static byte pubkey1[0x40];
 static byte ecdsa_private_key[0x60];
 
@@ -613,6 +614,25 @@ byte *sign2(EC_KEY* key, byte *data, int data_len) {
     return res;
 }
 
+// from https://github.com/uunicorn/python-validity/blob/5bf6b2bd10444fef1ed1552e71e9a08bf12d1b8b/validitysensor/sensor.py#L270
+void patch_timeslot_table(byte* bytes, size_t len, bool inc_addr, int mult) {
+    size_t i = 0;
+    while ( i + 3 < len ) {
+        if ( bytes[i] & 0xf8 == 0x10) {
+            if ( bytes[i+2] > 1) {
+                bytes[i+2] *= mult;
+                if (inc_addr)
+                    bytes[i+1] += 1;
+            }
+            i+=3;
+            continue;
+        }
+        else if ( bytes[i] == 0 )
+            i += 1;
+        else if ( bytes[i] == 7)
+            i += 2;
+    }
+}
 
 void handshake() {
     int len;
@@ -790,6 +810,18 @@ void tls_write(byte * data, int data_len) {
     free(wr);
 }
 
+
+/*
+void tls_sign(byte t, byte* data, int data_len) {
+    byte* buf = malloc(data_len + 5);
+
+    byte *res;
+    int res_len;
+    mac_then_encrypt(t, );
+
+}
+*/
+
 void tls_read(byte *output_buffer, int *output_len) {
     byte *raw_buff = malloc(1024 * 1024);
     int raw_buff_len;
@@ -879,6 +911,42 @@ int writeImage(char* filename, int width, int height, float *buffer) {
     if (png_ptr != NULL) png_destroy_write_struct(&png_ptr, (png_infopp)NULL);
 
     return code;
+}
+void build_cmd_02(int mode) {
+
+}
+
+void capture(int mode) {
+
+}
+
+typedef struct _rom_info {
+    unsigned int timestamp;
+    unsigned int build;
+    byte major;
+    byte minor;
+    byte pad0;
+    byte product;
+    byte pad1;
+    byte pad2;
+    byte pad3;
+    byte u1;
+} rom_info;
+
+static const byte get_rom_info_data[1] = { 0x01 };
+rom_info get_rom_info() {
+    byte buf[1024 * 1024];
+    tls_write(get_rom_info_data, 1);
+    int bytes_read;
+    tls_read(buf, &bytes_read);
+
+    if (bytes_read < (sizeof(rom_info) + 2)) {
+        // error
+    }
+    
+    rom_info info;
+    memcpy(&info, buf + 2, sizeof(rom_info));
+    return info;
 }
 
 void fingerprint() {
@@ -1003,6 +1071,8 @@ void fingerprint() {
                 puts("Scan succeeded! Low quality.");
                 break;
             }
+        } else {
+            puts("nothing\n");
         }
     }
 
@@ -1154,11 +1224,40 @@ void led_test() {
     tls_read(response, &response_len);puts("READ:");print_hex(response, response_len);
 }
 
+
+void create_enrollment() {
+    tls_write(enroll_sequence_create, sizeof(enroll_sequence_create));
+    byte buf[100 * 1024];
+    int bytes_read;
+    tls_read(buf, &bytes_read);
+    printf("read %i bytes\n %hhu %hhu", bytes_read, buf[0], buf[1]);
+    
+}
+
+
+void enroll() {
+    create_enrollment();
+
+}
+
+
+/*
+
+#define STEP(a,b) do_step(a, sizeof(a) / sizeof(byte), buff, &len, b, sizeof(b) / sizeof(dword));
+
+void send_init() {
+    // todo validate response
+    USB_SEND(init_sequence_msg1);
+    USB_SEND(init_sequence_msg2);
+}
+*/
+
 int main(int argc, char *argv[]) {
     puts("Prototype version 15");
     libusb_init(NULL);
     libusb_set_debug(NULL, 3);
 
+    // find and then load usb
     struct libusb_config_descriptor descr;
     libusb_device ** dev_list;
 
@@ -1183,20 +1282,26 @@ int main(int argc, char *argv[]) {
 
                 err(libusb_get_device_descriptor(dev_list[i], &descr));
                 err(libusb_open(dev_list[i], &dev));
+
+
                 break;
             }
         }
-
+        
     }
     if (dev == NULL) {
         puts("No devices found");
         return -1;
     }
 
+
+
     err(libusb_reset_device(dev));
+    // there seems to only be one config, this might mess things up
     err(libusb_set_configuration(dev, 1));
     err(libusb_claim_interface(dev, 0));
 
+    
     loadBiosData();
 
     puts("");
@@ -1212,6 +1317,11 @@ int main(int argc, char *argv[]) {
     init();
     handshake();
 
+    rom_info info = get_rom_info();
+    printf("timestamp: %u, build: %u, major: %hhu minor: %hhu product: %hhu u1: %hhu\n", 
+    info.timestamp, info.build, info.major, info.minor, info.product, info.u1);
+
+
     printf("IN: "); print_hex_string(key_block + 0x60, 0x20);
     printf("OUT: "); print_hex_string(key_block + 0x40, 0x20);
 
@@ -1221,6 +1331,7 @@ int main(int argc, char *argv[]) {
         puts("");
         puts("1 - Scan fingerprint");
         puts("2 - Test leds");
+        puts("3 - Entroll fingerprint");
         puts("0 - Exit");
 
         char x[1024];
@@ -1230,6 +1341,8 @@ int main(int argc, char *argv[]) {
             fingerprint();
         } else if (x[0] == '2') {
             led_test();
+        } else if (x[0] == '3') {
+            enroll();
         } else if (x[0] == '0') {
             exit(EXIT_SUCCESS);
         }
