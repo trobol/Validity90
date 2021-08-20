@@ -19,6 +19,7 @@
 
 #ifndef CONSTANTS_H
 #define CONSTANTS_H
+#include "sensor_type_info.h"
 
 #include "validity90/validity90.h"
 

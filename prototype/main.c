@@ -917,7 +917,66 @@ void build_cmd_02(int mode) {
 }
 
 void capture(int mode) {
+    
+}
 
+
+typedef unsigned short word;
+
+typedef struct _flash_partition_info {
+    byte id;
+    byte type;
+    word access_lvl;
+    dword offset;
+    dword size;
+} flash_partition_info;
+
+typedef struct _flash_ic_info {
+    const char* name;
+    int size;
+    int f18;
+    int jid0;
+    int jid1;
+    int f1b;
+    int f1c;
+} flash_ic_info;
+
+
+
+typedef struct _flash_info {
+    word jid0;
+    word jid1;
+    word blocks;
+    word unknown0;
+    word blocksize;
+    word unknown1;
+    word partition_count;
+    flash_partition_info partitions[];
+} flash_info;
+
+
+
+// flash_info must be freed
+flash_info* get_flash_info() {
+    static const byte get_flash_info_data[1] = { 0x3e };
+    byte buf[ 1024 * 1024 ];
+    int bytes_read;
+    qwrite(get_flash_info_data, 1);
+    qread(buf, 1024 * 1024, &bytes_read);
+
+    if ( bytes_read < (2 + sizeof(flash_info))) {
+        // error
+    }
+
+    flash_info* buf_info = (flash_info*)(buf+2);
+
+    int part_size = buf_info->partition_count * sizeof(flash_partition_info);
+    int info_size = sizeof(flash_info) + part_size;
+    flash_info* info = (flash_info*)malloc(info_size);
+    memcpy(info, buf_info, info_size);
+
+ 
+    return info;
 }
 
 typedef struct _rom_info {
@@ -933,11 +992,12 @@ typedef struct _rom_info {
     byte u1;
 } rom_info;
 
-static const byte get_rom_info_data[1] = { 0x01 };
+
 rom_info get_rom_info() {
+    static const byte get_rom_info_data[1] = { 0x01 };
     byte buf[1024 * 1024];
-    tls_write(get_rom_info_data, 1);
     int bytes_read;
+    tls_write(get_rom_info_data, 1);
     tls_read(buf, &bytes_read);
 
     if (bytes_read < (sizeof(rom_info) + 2)) {
@@ -1300,6 +1360,17 @@ int main(int argc, char *argv[]) {
     // there seems to only be one config, this might mess things up
     err(libusb_set_configuration(dev, 1));
     err(libusb_claim_interface(dev, 0));
+
+    // init flash
+    flash_info* flash_info = get_flash_info();
+    
+    if (flash_info->partition_count > 0) {
+        printf("flash has %hu partitions\n", flash_info->partition_count);
+    } else {
+        puts("flash is not initialized. formatting...");
+    }
+    // TODO: init flash
+
 
     
     loadBiosData();
