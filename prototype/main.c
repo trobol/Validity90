@@ -61,6 +61,7 @@
 #define err(x) res_err(x, xstr(x))
 #define errb(x) res_errb(x, xstr(x))
 #define byte guint8
+typedef unsigned short word;
 
 typedef struct DeviceInfo {
     guint16 vid;
@@ -184,6 +185,29 @@ void qread(byte * data, int len, int *out_len) {
 }
 
 
+const byte usb_cmd_buf[1024 * 1024] = {};
+// buffer is resused with each call
+// returns rsp
+byte* usb_cmd(byte* cmd, int len, byte* rsp, int max_rsp, int *rsp_len) {
+    int send;
+    err(libusb_bulk_transfer(dev, 0x01, cmd, len, &send, 10000));
+    err(libusb_bulk_transfer(dev, 0x81, rsp, len, rsp_len, 10000));
+    return rsp;
+}
+
+byte* usb_cmd_byte(byte cmd, byte* rsp, int max_rsp, int *rsp_len) {
+    return usb_cmd(&cmd, 1, rsp , max_rsp, rsp_len);
+}
+
+void assert_status(byte* rsp) {
+    word sig = *(word*)rsp;
+    if (sig != 0) {
+        if (sig == 0x44f) puts("FAILED SIGNATURE VALIDATION");
+        else puts("FAILED USB CMD");
+        exit(1);
+    }
+}
+
 static byte pubkey1[0x40];
 static byte ecdsa_private_key[0x60];
 
@@ -260,6 +284,101 @@ void init_steps(byte *buff, int len, int *out_len)
     *out_len = len;
 }
 
+
+typedef struct flash_read_cmd {
+    byte cmd; // 0x40
+    byte partition;
+    byte unknown0; // 1
+    word unknown1; // 0
+    dword addr;
+    dword size;
+} flash_read_cmd;
+
+
+
+void read_flash(byte* rsp, int max_rsp, int* rsp_size, byte partition, dword addr, dword size) {
+    byte rsp_buf[1024 * 1024]; // TODO: find real size
+    int rsp_len;
+    flash_read_cmd cmd = { 0x40, partition, 1, 0, addr, size};
+    // TODO if tls is active use that
+    usb_cmd(&cmd, sizeof(flash_read_cmd), rsp, 1024 * 1024, &rsp_len);
+    assert_status(rsp);
+
+    dword data_size = (*(dword*)(rsp + 2));
+    
+    memcpy(rsp, rsp_buf + 8, data_size);
+    
+    *rsp_size = data_size;
+}
+
+void read_tls_flash(byte* rsp, int max_rsp, int* rsp_size) {
+    return read_flash(rsp, max_rsp, rsp_size, 1, 0, 0x1000);
+}
+
+typedef struct _firmware_module_info {
+    word type;
+    word subtype;
+    word major;
+    word minor;
+    dword size;
+} firmware_module_info;
+
+typedef struct _firmware_info {
+    word major;
+    word minor;
+    word module_count;
+    dword buildtime;
+    firmware_module_info modules[];
+} firmware_info;
+
+bool has_firmware() {
+    const byte cmd[2] = { 0x43, 0x02 }; // read partition, second partition
+    byte rsp[1024 * 1024];
+    int rsp_len;
+    // status + 10
+    
+    qwrite(cmd, 2);
+    qread(rsp, 1024 * 1024, &rsp_len);
+
+    word status = *(word*)rsp;
+
+    return status == 0;
+}
+
+// firmware_info must be freed
+firmware_info* get_firmware_info() {
+    const byte cmd[2] = { 0x43, 0x02 }; // read partition, second partition
+    byte rsp[1024 * 1024];
+    int rsp_len;
+    // status + 10
+    
+    qwrite(cmd, 2);
+    qread(rsp, 1024 * 1024, &rsp_len);
+
+    // no firmware yet
+    if (rsp_len == 2 && rsp[0] == 0xb0 && rsp[1] == 0x04)
+        return NULL;
+
+    assert_status(rsp);
+    
+    if (rsp_len-2 < sizeof(firmware_info)) {
+        puts("firmware info response wasn't large enough"); exit(1);
+    }
+
+    firmware_info *tmp_info = (firmware_info*)(rsp + 2);
+    const firm_size = sizeof(firmware_info) + ( sizeof(firmware_module_info) * tmp_info->module_count );
+
+    if (rsp_len-2 < firm_size) {
+        puts("firmware info response wasn't large enough"); exit(1);
+    }
+
+    firmware_info *info = (firmware_info*)malloc(firm_size);
+    memcpy(info, tmp_info, firm_size);
+
+    return info;
+}
+
+
 void setup() {
     int len;
     byte buff[1024 * 1024];
@@ -277,7 +396,7 @@ void setup() {
     puts("step 5");STEP(init_sequence_msg5, setup_sequence_rsp5);
     print_hex(buff, len);
 
-    puts("step 6");STEP(setup_sequence_msg6, setup_sequence_rsp6);
+    puts("step 6");STEP(setup_sequence_msg6, setup_sequence_rsp6); // read flash for tls
     print_hex(buff, len);
 
     puts("step 7");STEP(setup_sequence_msg7, setup_sequence_rsp7);
@@ -310,11 +429,32 @@ void setup() {
     exit(EXIT_FAILURE);
 }
 
+byte* get_init_hardcoded() {
+    return init_sequence_msg4;
+}
+
+void send_init() {
+    byte rsp[1024 * 1024] = {};
+    // these have something to do with hardware
+    assert_status(usb_cmd_byte(0x00, rsp, 1024*1024, NULL));
+    assert_status(usb_cmd_byte(0x19, rsp, 1024*1024, NULL));
+
+    bool fw = has_firmware();
+
+    assert_status(usb_cmd(init_sequence_msg4, sizeof(init_sequence_msg4), rsp, 1024*1024, NULL));
+    
+    // if there is no firmware upload clean slate
+    if ( !fw ) {
+        // TODO: upload init_hardcoded_clean_slate
+    }
+}
+
 void init() {
     int len;
     byte buff[1024 * 1024];
 
-    puts("step 1");STEP(init_sequence_msg1, init_sequence_rsp1);
+
+
 
     if (getenv("FORCE_RESET") != NULL) {
         puts("Sending reset commands");
@@ -634,7 +774,130 @@ void patch_timeslot_table(byte* bytes, size_t len, bool inc_addr, int mult) {
     }
 }
 
+bool cmp_hash_sha256(byte* msg, int len, byte* hash) {
+    byte md[SHA256_DIGEST_LENGTH];
+    SHA256_CTX context;
+    if(!SHA256_Init(&context))
+        return false; // error
+
+    if(!SHA256_Update(&context, msg, len))
+        return false; // error
+
+    if(!SHA256_Final(md, &context))
+        return false; // error
+
+    return memcmp(md, hash, SHA256_DIGEST_LENGTH) == 0;
+}
+
+void parse_tls_priv(byte* body, int len) {
+    puts("found priv block");
+}
+
+
+void parse_tls_ecdh(byte* body, int len) {
+    // TODO: error checking on all these openssl functions
+    byte* key = body;
+    dword sig_len = *(dword*)(body + 0x90); // key is 0x90 bytes long
+    byte* sig = body + 0x90 + 4;
+    byte* zeros = sig + sig_len;
+    
+    // whats in the key that we are skipping?
+    // key:
+    //    bytes 0->7 ?
+    //    bytes 8->39 x coord
+    //    bytes 40->71 ? 32 bytes
+    //    bytes 72->103 y coord
+    //    bytes 104->143 ? 40 bytes
+    BIGNUM* x = BN_new();
+    BIGNUM* y = BN_new();
+    BN_bin2bn( key + 0x08, 32, x);  
+    BN_bin2bn( key + 0x4c, 32, y);
+
+    // "Note that in [PKI-ALG] ... the secp256r1 curve was referred to as prime256v1." https://www.ietf.org/rfc/rfc5480.txt
+    EC_KEY* pubkey = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+    EC_KEY_set_public_key_affine_coordinates(pubkey, x, y);
+
+    for(byte* end = body + len; zeros < end; zeros++) {
+        if (*zeros != 0) {
+            puts("ZEROS EXPECTED");
+            exit(1);
+        }
+    }
+
+    // "The following pub key is hardcoded for each fw revision in the synaWudfBioUsb.dll.
+    //      Corresponding private key should only be known to a genuine Synaptic device."
+    EC_KEY* fwpub = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+    EC_KEY_set_public_key_affine_coordinates(fwpub, 
+        0xf727653b4e16ce0665a6894d7f3a30d7d0a0be310d1292a743671fdf69f6a8d3,
+        0xa85538f8b6bec50d6eef8bd5f4d07a886243c58b2393948df761a84721a6ca94);
+
+    if ( !ECDSA_verify(0, key, 0x90, sig, sig_len, fwpub) ) {
+        puts("invalid signature");
+        exit(1);
+    }
+    puts("parsed ecdh block");
+}
+
+void parse_tls_cert(byte* body, int len) {
+    puts("found cert block");
+}
+
+void parse_tls_empty(byte* body, int len) {
+    for (byte* end = body + len; body < end; body++) 
+    if (*body != 0) {
+        puts("EXPECTED EMPTY BLOCK");
+        exit(1);
+    }
+}
+
+void parse_tls_flash() {
+    byte tls_flash[1024 * 1024];
+    int rsp_size;
+    read_tls_flash(tls_flash, 1024 * 1024, &rsp_size);
+    
+    SHA256_CTX context;
+    byte* end = tls_flash + rsp_size;
+    byte* itr = tls_flash;
+    // TODO: error checking on data amount
+    while(itr < end) {
+        word id = *(word*)itr;
+        word len = *(word*)(itr+2);
+        byte* hash = itr + 4;
+        itr += 4 + SHA256_DIGEST_LENGTH; // hash is 32 bytes
+        byte* body = itr;
+         itr += len;
+
+        if (! cmp_hash_sha256(body, len, hash)) {
+            puts("HASH MISMATCH");
+            exit(1);
+        }
+
+        switch(id) {
+            case 0:
+            case 1:
+            case 2:
+                parse_tls_empty(body, len);
+                break;
+            case 3:
+                parse_tls_cert(body, len);
+                break;
+            case 4:
+                parse_tls_priv(body, len);
+                break;
+            case 6:
+                parse_tls_ecdh(body, len);
+                break;
+            default:
+                printf("unhandled block id %04x\n", id);
+        }
+
+           
+       
+    }
+}
+
 void handshake() {
+
     int len;
     byte *client_hello = malloc(len = sizeof(tls_client_hello) / sizeof(byte));
     byte buff[1024 * 1024];
@@ -921,7 +1184,7 @@ void capture(int mode) {
 }
 
 
-typedef unsigned short word;
+
 
 typedef struct _flash_partition_info {
     byte id;
@@ -977,6 +1240,23 @@ flash_info* get_flash_info() {
 
  
     return info;
+}
+
+void init_flash() {
+     // init flash
+    flash_info* flash_info = get_flash_info();
+    word part_count = flash_info->partition_count;
+    free(flash_info);
+
+    if (part_count > 0) {
+        printf("flash has %hu partitions\n", part_count);
+        return;
+    }
+    
+    puts("flash is not initialized. formatting...");
+    
+
+    // TODO: init flash
 }
 
 typedef struct _rom_info {
@@ -1312,11 +1592,8 @@ void send_init() {
 }
 */
 
-int main(int argc, char *argv[]) {
-    puts("Prototype version 15");
-    libusb_init(NULL);
-    libusb_set_debug(NULL, 3);
 
+void open_usb_device() {
     // find and then load usb
     struct libusb_config_descriptor descr;
     libusb_device ** dev_list;
@@ -1335,7 +1612,7 @@ int main(int argc, char *argv[]) {
                 }
 
                 if (all_devices[j].unsupported) {
-                    return -1;
+                    exit(-1);
                 }
 
                 idProduct = descriptor.idProduct;
@@ -1349,29 +1626,31 @@ int main(int argc, char *argv[]) {
         }
         
     }
+}
+
+int main(int argc, char *argv[]) {
+    puts("Prototype version 15");
+    libusb_init(NULL);
+    libusb_set_debug(NULL, 3);
+
+    open_usb_device();
+  
     if (dev == NULL) {
         puts("No devices found");
         return -1;
     }
 
 
-
+    // is this needed?
     err(libusb_reset_device(dev));
     // there seems to only be one config, this might mess things up
     err(libusb_set_configuration(dev, 1));
     err(libusb_claim_interface(dev, 0));
 
-    // init flash
-    flash_info* flash_info = get_flash_info();
-    
-    if (flash_info->partition_count > 0) {
-        printf("flash has %hu partitions\n", flash_info->partition_count);
-    } else {
-        puts("flash is not initialized. formatting...");
-    }
-    // TODO: init flash
+   
 
 
+    init_flash();
     
     loadBiosData();
 
@@ -1383,10 +1662,14 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    OpenSSL_add_all_algorithms(); ERR_load_crypto_strings();
+    OpenSSL_add_all_algorithms();
+    ERR_load_crypto_strings();
 
-    init();
-    handshake();
+    send_init();
+
+    parse_tls_flash();
+    //init();
+    //handshake();
 
     rom_info info = get_rom_info();
     printf("timestamp: %u, build: %u, major: %hhu minor: %hhu product: %hhu u1: %hhu\n", 

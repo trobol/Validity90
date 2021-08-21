@@ -23,8 +23,8 @@
 
 #include "validity90/validity90.h"
 
-#define dword unsigned int
-#define byte unsigned char
+typedef unsigned int dword;
+typedef unsigned char byte;
 
 #define MASK_VARIABLE (1 << 30)
 #define M(x) (MASK_VARIABLE | x)
@@ -2954,5 +2954,4 @@ static char v97_scan_matrix2[] = {
 
 static const byte enroll_sequence_create[] = { 0x69, 0x00, 0x00, 0x00, 0x01  };
 
-#undef byte
 #endif // CONSTANTS_H
