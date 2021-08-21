@@ -191,7 +191,7 @@ const byte usb_cmd_buf[1024 * 1024] = {};
 byte* usb_cmd(byte* cmd, int len, byte* rsp, int max_rsp, int *rsp_len) {
     int send;
     err(libusb_bulk_transfer(dev, 0x01, cmd, len, &send, 10000));
-    err(libusb_bulk_transfer(dev, 0x81, rsp, len, rsp_len, 10000));
+    err(libusb_bulk_transfer(dev, 0x81, rsp, max_rsp, rsp_len, 10000));
     return rsp;
 }
 
