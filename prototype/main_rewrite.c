@@ -491,29 +491,26 @@ void hash_sha256(byte *in, int len, byte* out) {
 }
 
 
-EC_KEY* derive_private_key(BIGNUM* bn_d) {
+EC_KEY* derive_private_key(byte* d) {
     // "Note that in [PKI-ALG] ... the secp256r1 curve was referred to as prime256v1." https://www.ietf.org/rfc/rfc5480.txt
     const EC_KEY* key = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
     const EC_GROUP* group = EC_KEY_get0_group(key);
-    const EC_POINT* point = EC_POINT_new(group);
 
     const BN_CTX* bn_ctx = BN_CTX_new();
+    const BIGNUM* prv = make_bignum(d);
+    const EC_POINT* pub = EC_POINT_new(group);
+    
 
 
     BN_CTX_start(bn_ctx);
-    EC_POINT_mul(group, point, bn_d, NULL, NULL, bn_ctx);
-
-    const BIGNUM* bn_x = BN_CTX_get(bn_ctx);
-    const BIGNUM* bn_y = BN_CTX_get(bn_ctx);
-
-    EC_POINT_get_affine_coordinates(group, point, bn_x, bn_y, bn_ctx);
-
-    BN_CTX_end(bn_ctx);
+    EC_POINT_mul(group, pub, prv, NULL, NULL, bn_ctx);
 
 
-    EC_KEY_set_public_key(key, point);
-    EC_KEY_set_private_key(key, bn_d);
-
+ 
+    EC_KEY_set_private_key(key, prv);
+    EC_KEY_set_public_key(key, pub);
+    
+    BN_CTX_free(bn_ctx);
     return key;
 } 
 
