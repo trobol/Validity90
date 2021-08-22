@@ -189,9 +189,10 @@ const byte usb_cmd_buf[1024 * 1024] = {};
 // buffer is resused with each call
 // returns rsp
 byte* usb_cmd(byte* cmd, int len, byte* rsp, int max_rsp, int *rsp_len) {
-    int send;
-    err(libusb_bulk_transfer(dev, 0x01, cmd, len, &send, 10000));
-    err(libusb_bulk_transfer(dev, 0x81, rsp, max_rsp, rsp_len, 10000));
+    int out_len;
+
+    qwrite(cmd, len);
+    qread(rsp, max_rsp, rsp_len ? rsp_len : &out_len);
     return rsp;
 }
 
@@ -292,7 +293,7 @@ typedef struct flash_read_cmd {
     word unknown1; // 0
     dword addr;
     dword size;
-} flash_read_cmd;
+} __attribute__((packed)) flash_read_cmd ;
 
 
 
@@ -301,10 +302,10 @@ void read_flash(byte* rsp, int max_rsp, int* rsp_size, byte partition, dword add
     int rsp_len;
     flash_read_cmd cmd = { 0x40, partition, 1, 0, addr, size};
     // TODO if tls is active use that
-    usb_cmd(&cmd, sizeof(flash_read_cmd), rsp, 1024 * 1024, &rsp_len);
-    assert_status(rsp);
+    usb_cmd(&cmd, sizeof(flash_read_cmd), rsp_buf, 1024 * 1024, &rsp_len);
+    assert_status(rsp_buf);
 
-    dword data_size = (*(dword*)(rsp + 2));
+    dword data_size = (*(dword*)(rsp_buf + 2));
     
     memcpy(rsp, rsp_buf + 8, data_size);
     
@@ -441,11 +442,13 @@ void send_init() {
 
     bool fw = has_firmware();
 
-    assert_status(usb_cmd(init_sequence_msg4, sizeof(init_sequence_msg4), rsp, 1024*1024, NULL));
+    assert_status(usb_cmd(init_sequence_msg4_alt, sizeof(init_sequence_msg4_alt), rsp, 1024*1024, NULL));
     
     // if there is no firmware upload clean slate
     if ( !fw ) {
         // TODO: upload init_hardcoded_clean_slate
+        puts("REQUIRED CLEAN SLATE");
+        exit(1);
     }
 }
 
@@ -793,13 +796,22 @@ void parse_tls_priv(byte* body, int len) {
     puts("found priv block");
 }
 
+void reverse(byte* in, byte* out, int len) {
+    byte* dst = out + len - 1;
+    while (dst >= out) {
+        *(dst--) = *(in++);
+    }
+}
 
 void parse_tls_ecdh(byte* body, int len) {
+    puts("ecdh");
+    print_hex(body, len);
     // TODO: error checking on all these openssl functions
     byte* key = body;
     dword sig_len = *(dword*)(body + 0x90); // key is 0x90 bytes long
     byte* sig = body + 0x90 + 4;
     byte* zeros = sig + sig_len;
+    printf("len: %lu\n", sig_len);
     
     // whats in the key that we are skipping?
     // key:
@@ -808,14 +820,34 @@ void parse_tls_ecdh(byte* body, int len) {
     //    bytes 40->71 ? 32 bytes
     //    bytes 72->103 y coord
     //    bytes 104->143 ? 40 bytes
-    BIGNUM* x = BN_new();
-    BIGNUM* y = BN_new();
-    BN_bin2bn( key + 0x08, 32, x);  
-    BN_bin2bn( key + 0x4c, 32, y);
+    byte buf[32];
+    reverse(key + 0x08, buf, 32);
+    BIGNUM* x = BN_bin2bn( buf, 32, NULL);  
+    
+    reverse( key + 0x4c, buf, 32);
+    BIGNUM* y =  BN_bin2bn( buf, 32, NULL);
+
+    printf("x: %s\ny: %s\n", BN_bn2hex(x), BN_bn2hex(y));
+    
 
     // "Note that in [PKI-ALG] ... the secp256r1 curve was referred to as prime256v1." https://www.ietf.org/rfc/rfc5480.txt
     EC_KEY* pubkey = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
-    EC_KEY_set_public_key_affine_coordinates(pubkey, x, y);
+    if (pubkey == NULL) {
+        puts("FAILED TO CREATE KEY");
+        exit(1);
+    }
+    if (! EC_KEY_set_public_key_affine_coordinates(pubkey, x, y)) {
+        puts("FAILED TO SET KEY pubkey");
+        exit(1);
+    }
+
+    puts("key");
+    print_hex(key, 0x90);
+    puts("sig");
+    print_hex(sig, sig_len);
+    puts("zeros");
+    print_hex(zeros, len-sig_len);
+    
 
     for(byte* end = body + len; zeros < end; zeros++) {
         if (*zeros != 0) {
@@ -827,12 +859,42 @@ void parse_tls_ecdh(byte* body, int len) {
     // "The following pub key is hardcoded for each fw revision in the synaWudfBioUsb.dll.
     //      Corresponding private key should only be known to a genuine Synaptic device."
     EC_KEY* fwpub = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
-    EC_KEY_set_public_key_affine_coordinates(fwpub, 
-        0xf727653b4e16ce0665a6894d7f3a30d7d0a0be310d1292a743671fdf69f6a8d3,
-        0xa85538f8b6bec50d6eef8bd5f4d07a886243c58b2393948df761a84721a6ca94);
+    if (fwpub == NULL) {
+        puts("FAILED TO CREATE KEY");
+        exit(1);
+    }
+    byte fw_x_raw[32] = { 0xf7, 0x27, 0x65, 0x3b, 0x4e, 0x16, 0xce, 0x06, 0x65, 0xa6, 0x89, 0x4d, 0x7f, 0x3a, 0x30, 0xd7, 0xd0, 0xa0, 0xbe, 0x31, 0x0d, 0x12, 0x92, 0xa7, 0x43, 0x67, 0x1f, 0xdf, 0x69, 0xf6, 0xa8, 0xd3 };
+    byte fw_y_raw[32] = { 0xa8, 0x55, 0x38, 0xf8, 0xb6, 0xbe, 0xc5, 0x0d, 0x6e, 0xef, 0x8b, 0xd5, 0xf4, 0xd0, 0x7a, 0x88, 0x62, 0x43, 0xc5, 0x8b, 0x23, 0x93, 0x94, 0x8d, 0xf7, 0x61, 0xa8, 0x47, 0x21, 0xa6, 0xca, 0x94 };
 
-    if ( !ECDSA_verify(0, key, 0x90, sig, sig_len, fwpub) ) {
+    BIGNUM* fw_x = BN_bin2bn( fw_x_raw, 32, NULL);  
+    BIGNUM* fw_y = BN_bin2bn( fw_y_raw, 32, NULL);  
+    
+    print_hex(fw_x_raw, 32);
+    printf("x: %s\ny: %s\n", BN_bn2hex(fw_x), BN_bn2hex(fw_y));
+    
+
+    if (! EC_KEY_set_public_key_affine_coordinates(fwpub, fw_x, fw_y))  {
+        puts("FAILED TO SET KEY fwpub");
+        exit(1);
+    }
+    // why is the data hashed? is this common?
+    byte data[EVP_MAX_MD_SIZE];
+    int data_len;
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    const EVP_MD* md = EVP_get_digestbyname("sha256");
+    EVP_DigestInit_ex(ctx, md, NULL);
+    EVP_DigestUpdate(ctx, key, 0x90);
+    EVP_DigestFinal_ex(ctx, data, &data_len);
+
+
+    int verify = ECDSA_verify(0, data, data_len, sig, sig_len, fwpub);
+    if ( verify == 1 ) {
+       puts("verified signature");
+    } else if (verify == 0) {
         puts("invalid signature");
+        exit(1);
+    } else {
+        puts("ERROR while verifying signature");
         exit(1);
     }
     puts("parsed ecdh block");
