@@ -474,8 +474,8 @@ rom_info get_rom_info() {
  *
  */
 
-BIGNUM* make_bignum(dword n) {
-    return BN_lebin2bn( &n, 32, NULL);
+BIGNUM* make_bignum(byte* n) {
+    return BN_lebin2bn( n, 32, NULL);
 }
 
 
@@ -491,13 +491,12 @@ void hash_sha256(byte *in, int len, byte* out) {
 }
 
 
-EC_KEY* derive_private_key(dword d) {
+EC_KEY* derive_private_key(BIGNUM* bn_d) {
     // "Note that in [PKI-ALG] ... the secp256r1 curve was referred to as prime256v1." https://www.ietf.org/rfc/rfc5480.txt
     const EC_KEY* key = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
     const EC_GROUP* group = EC_KEY_get0_group(key);
     const EC_POINT* point = EC_POINT_new(group);
 
-    const BIGNUM* bn_d = make_bignum( d );
     const BN_CTX* bn_ctx = BN_CTX_new();
 
 
@@ -557,19 +556,23 @@ void parse_tls_priv(byte* body, int len) {
 
     int keys_decrypt_len_total = keys_decrypt_len0 + keys_decrypt_len1;
 
-    dword* keys_num = (dword*)keys_decrypt;
-    dword x = keys_num[0];
-    dword y = keys_num[1];
-    dword d = keys_num[2];
+    byte* x = keys_decrypt;
+    byte* y = keys_decrypt + 32;
+    byte* d = keys_decrypt + 64;
     
     puts("private key:");
-    printf(" x: %lu \n", x);
-    printf(" y: %lu \n", d);
-    printf(" d: %lu \n", d);
+    puts(" x:");
+    print_hex(x, 32);
+    puts(" y:");
+    print_hex(y, 32);
+    puts(" d:");
+    print_hex(d, 32);
 
     // "Someone has reported that x and y are 0 after pairing with the latest windows driver."
     //pub_key = ec.EllipticCurvePublicNumbers(x, y, ec.SECP256R1())
     //elf.priv_key = ec.EllipticCurvePrivateNumbers(d, pub_key).private_key(crypto_backend)
+
+
 
     EC_KEY* key = derive_private_key(d);
 }
@@ -578,9 +581,9 @@ struct tls_ecdh_info {
 union {
     struct {
     byte unknown0[8];
-    dword x;
+    byte x[32];
     byte unknown1[36];
-    dword y;
+    byte y[32];
     byte unknown2[36];
     };
     byte key[0x90];
@@ -639,8 +642,13 @@ void parse_tls_ecdh(byte* body, int len) {
         exit(1);
     }
 
-    BIGNUM* fw_x = make_bignum( 0xf727653b4e16ce0665a6894d7f3a30d7d0a0be310d1292a743671fdf69f6a8d3 );  
-    BIGNUM* fw_y = make_bignum( 0xa85538f8b6bec50d6eef8bd5f4d07a886243c58b2393948df761a84721a6ca94 );  
+    byte fw_x_raw[32] = { 0xf7, 0x27, 0x65, 0x3b, 0x4e, 0x16, 0xce, 0x06, 0x65, 0xa6, 0x89, 0x4d, 0x7f, 0x3a, 0x30, 0xd7, 0xd0, 0xa0, 0xbe, 0x31, 0x0d, 0x12, 0x92, 0xa7, 0x43, 0x67, 0x1f, 0xdf, 0x69, 0xf6, 0xa8, 0xd3 };
+    byte fw_y_raw[32] = { 0xa8, 0x55, 0x38, 0xf8, 0xb6, 0xbe, 0xc5, 0x0d, 0x6e, 0xef, 0x8b, 0xd5, 0xf4, 0xd0, 0x7a, 0x88, 0x62, 0x43, 0xc5, 0x8b, 0x23, 0x93, 0x94, 0x8d, 0xf7, 0x61, 0xa8, 0x47, 0x21, 0xa6, 0xca, 0x94 };
+
+    // these are already in big-endian format so dont use make_bignum
+    BIGNUM* fw_x = BN_bin2bn( fw_x_raw, 32, NULL);  
+    BIGNUM* fw_y = BN_bin2bn( fw_y_raw, 32, NULL);  
+    
 
     if (! EC_KEY_set_public_key_affine_coordinates(fwpub, fw_x, fw_y))  {
         puts("FAILED TO SET KEY fwpub");
