@@ -115,14 +115,14 @@ void qwrite(byte * data, int len) {
     int send;
     err(libusb_bulk_transfer(dev, 0x01, data, len, &send, 10000));
 
-    puts("usb write (%u bytes):\n");
+    printf("usb write (%u bytes):\n", len);
     print_hex(data, len);
 }
 
 void qread(byte * data, int len, int *out_len) {
     err(libusb_bulk_transfer(dev, 0x81, data, len, out_len, 10000));
 
-    printf("usb read (%u bytes):\n");
+    printf("usb read (%u bytes):\n", *out_len);
     print_hex(data, *out_len);
 }
 
@@ -137,7 +137,7 @@ word usb_cmd(byte* cmd, int len, byte* rsp, int max_rsp, int *rsp_len) {
     if (out_len < 2) {
         throw_error("usb command response was too short");
     }
-    *rsp_len = out_len;
+    if (rsp_len) *rsp_len = out_len;
     return *(word*)rsp;
 }
 
@@ -145,11 +145,11 @@ word usb_cmd_byte(byte cmd, byte* rsp, int max_rsp, int *rsp_len) {
     return usb_cmd(&cmd, 1, rsp , max_rsp, rsp_len);
 }
 
-void assert_status(byte* rsp) {
-    word sig = *(word*)rsp;
-    if (sig != 0) {
+void assert_status(word status) {
+    if (status != 0) {
+        printf("signature=%u\n", status);
         // what signature?
-        if (sig == 0x44f) throw_error("usb cmd failed signature validation");
+        if (status == 0x44f) throw_error("usb cmd failed signature validation");
         else throw_error("usb cmd returned error status");
     }
 }
@@ -260,8 +260,8 @@ void read_flash(byte* rsp, int max_rsp, int* rsp_size, byte partition, dword add
     int rsp_len;
     flash_read_cmd cmd = { 0x40, partition, 1, 0, addr, size};
     // TODO if tls is active use that
-    usb_cmd(&cmd, sizeof(flash_read_cmd), rsp_buf, 1024 * 1024, &rsp_len);
-    assert_status(rsp_buf);
+    int status = usb_cmd(&cmd, sizeof(flash_read_cmd), rsp_buf, 1024 * 1024, &rsp_len);
+    assert_status(status);
 
     dword data_size = (*(dword*)(rsp_buf + 2));
     
@@ -481,7 +481,7 @@ BIGNUM* make_bignum(dword n) {
 
 // output is "SHA256_DIGEST_LENGTH" bytes
 void hash_sha256(byte *in, int len, byte* out) {
-    SHA256_CTX* context;
+    SHA256_CTX context;
     if(!SHA256_Init(&context))
         throw_error("failed to init sha256 hash context");
     if(!SHA256_Update(&context, in, len))
@@ -689,11 +689,14 @@ void parse_tls_flash() {
         byte* hash = itr + 4;
         itr += 4 + SHA256_DIGEST_LENGTH; // hash is 32 bytes
         byte* body = itr;
-         itr += len;
+        itr += len;
+
+        if (id == 0xffff) break;
 
         hash_sha256(body, len, hashed_body);
         if (memcmp(hashed_body, hash, SHA256_DIGEST_LENGTH) != 0) {
-           throw_error("tls section hash did not match hash of body");
+            printf("block id %hu\n", id);
+            throw_error("tls section hash did not match hash of body");
         }
 
         switch(id) {
