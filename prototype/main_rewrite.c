@@ -154,6 +154,13 @@ void assert_status(byte* rsp) {
     }
 }
 
+void reverse(byte* data, int len) {
+    for( byte *end = data+len-1; data < end; data++, end--) {
+        byte tmp = *data;
+        *data = *end;
+        *end = tmp;
+    }
+}
 
 byte system_serial[1024];
 int system_serial_len;
@@ -180,9 +187,60 @@ void loadBiosData() {
 
     fclose(nameFile);
     fclose(serialFile);
+
+    set_hwkey(name, serial);
 }
 
+// key and out are 32 bytes
+void hmac_sha256_compute(byte* key, byte* data, int data_len, byte* out) {
+    HMAC(EVP_sha256(), key, 32, data, data_len, out, NULL);
+}
 
+byte psk_encryption_key[32];
+byte psk_validation_key[32];
+
+
+
+// out must be out_len bytes long
+void prf(byte* secret, byte* seed, int seed_len, byte* out, int len) {
+
+    
+    byte* a_len = 32 + seed_len; 
+    byte* a = (byte*)malloc(a_len); 
+    memcpy(a + 32, seed, seed_len); 
+
+    hmac_sha256_compute(secret, seed, seed_len, a);
+    
+    for (byte* res = out; res < out+len; res += 32) {
+        hmac_sha256_compute(secret, a, a_len, res); // seed is a + seed
+        hmac_sha256_compute(secret, a, 32, a); // seed is a, replace a in "a + seed" buffer
+    }
+}
+
+void set_hwkey(char* name, char* serial) {
+    // null terminators are included
+    int name_len   = strlen(name)   + 1;
+    int serial_len = strlen(serial) + 1;
+    int hwkey_len  = name_len + serial_len; 
+
+    byte* hwkey = (byte*)malloc(hwkey_len);
+    memcpy(hwkey, name, name_len);
+    memcpy(hwkey + name_len, serial, serial_len);
+
+    int seed_len = 3 + hwkey_len;
+    byte* seed = (byte*)malloc(seed_len);
+    memcpy(seed + 3, hwkey, hwkey_len);
+    seed[0] = 'G';
+    seed[1] = 'W';
+    seed[2] = 'K';
+
+    prf(password_hardcoded, seed, seed_len, psk_encryption_key, 32);
+    prf(psk_encryption_key, gwk_sign_hardcoded, sizeof(gwk_sign_hardcoded), psk_validation_key, 32);
+    
+    print_hex(psk_encryption_key, 32);
+    print_hex(psk_validation_key, 32);
+
+}
 /*
  * READING DATA OFF DEVICE
  */ 
@@ -416,16 +474,8 @@ rom_info get_rom_info() {
  *
  */
 
-
-void parse_tls_priv(byte* body, int len) {
-    puts("found priv block");
-}
-
-void reverse(byte* in, byte* out, int len) {
-    byte* dst = out + len - 1;
-    while (dst >= out) {
-        *(dst--) = *(in++);
-    }
+BIGNUM* make_bignum(dword n) {
+    return BN_lebin2bn( &n, 32, NULL);
 }
 
 
@@ -441,29 +491,116 @@ void hash_sha256(byte *in, int len, byte* out) {
 }
 
 
+EC_KEY* derive_private_key(dword d) {
+    // "Note that in [PKI-ALG] ... the secp256r1 curve was referred to as prime256v1." https://www.ietf.org/rfc/rfc5480.txt
+    const EC_KEY* key = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+    const EC_GROUP* group = EC_KEY_get0_group(key);
+    const EC_POINT* point = EC_POINT_new(group);
+
+    const BIGNUM* bn_d = make_bignum( d );
+    const BN_CTX* bn_ctx = BN_CTX_new();
+
+
+    BN_CTX_start(bn_ctx);
+    EC_POINT_mul(group, point, bn_d, NULL, NULL, bn_ctx);
+
+    const BIGNUM* bn_x = BN_CTX_get(bn_ctx);
+    const BIGNUM* bn_y = BN_CTX_get(bn_ctx);
+
+    EC_POINT_get_affine_coordinates(group, point, bn_x, bn_y, bn_ctx);
+
+    BN_CTX_end(bn_ctx);
+
+
+    EC_KEY_set_public_key(key, point);
+    EC_KEY_set_private_key(key, bn_d);
+
+    return key;
+} 
+
+
+struct tls_priv_info {
+    byte prefix;
+union {
+    struct {
+        byte iv[16];
+        byte keys[112];
+    };
+    byte data[128];
+};
+    
+    byte hash[32];
+} __attribute__((packed));
+
+
+void parse_tls_priv(byte* body, int len) {
+    puts("found priv block");
+    
+    struct tls_priv_info* info = body;
+    if ( info->prefix != 2 ) throw_error("unknown private key prefix");
+
+    byte sig[32];
+    hmac_sha256_compute(psk_validation_key, info->data, 128, sig);
+
+    if ( memcmp(info->hash, sig, 32) != 0 )
+        throw_error("signature verification failed. this device was probably paired with another computer");
+    
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+
+    byte keys_decrypt[112 + 128];
+    int keys_decrypt_len0;
+    int keys_decrypt_len1;
+
+    EVP_DecryptInit(ctx, EVP_aes_256_cbc(), psk_encryption_key, info->iv);
+    EVP_DecryptUpdate(ctx, keys_decrypt, &keys_decrypt_len0, info->keys, 112);
+    EVP_DecryptFinal(ctx, keys_decrypt + keys_decrypt_len0, &keys_decrypt_len1);
+
+    int keys_decrypt_len_total = keys_decrypt_len0 + keys_decrypt_len1;
+
+    dword* keys_num = (dword*)keys_decrypt;
+    dword x = keys_num[0];
+    dword y = keys_num[1];
+    dword d = keys_num[2];
+    
+    puts("private key:");
+    printf(" x: %lu \n", x);
+    printf(" y: %lu \n", d);
+    printf(" d: %lu \n", d);
+
+    // "Someone has reported that x and y are 0 after pairing with the latest windows driver."
+    //pub_key = ec.EllipticCurvePublicNumbers(x, y, ec.SECP256R1())
+    //elf.priv_key = ec.EllipticCurvePrivateNumbers(d, pub_key).private_key(crypto_backend)
+
+    EC_KEY* key = derive_private_key(d);
+}
+
+struct tls_ecdh_info {
+union {
+    struct {
+    byte unknown0[8];
+    dword x;
+    byte unknown1[36];
+    dword y;
+    byte unknown2[36];
+    };
+    byte key[0x90];
+};
+    dword sig_len;
+    byte sig[];
+} __attribute__((packed));
+
+
+
+
 void parse_tls_ecdh(byte* body, int len) {
     puts("ecdh");
     print_hex(body, len);
-    // TODO: error checking on all these openssl functions
-    byte* key = body;
-    dword sig_len = *(dword*)(body + 0x90); // key is 0x90 bytes long
-    byte* sig = body + 0x90 + 4;
-    byte* zeros = sig + sig_len;
-    printf("len: %lu\n", sig_len);
+   
+    struct tls_ecdh_info* info = body;
+    byte* zeros = info->sig + info->sig_len;
     
-    // whats in the key that we are skipping?
-    // key:
-    //    bytes 0->7 ?
-    //    bytes 8->39 x coord
-    //    bytes 40->71 ? 32 bytes
-    //    bytes 72->103 y coord
-    //    bytes 104->143 ? 40 bytes
-    byte buf[32];
-    reverse(key + 0x08, buf, 32);
-    BIGNUM* x = BN_bin2bn( buf, 32, NULL);  
-    
-    reverse( key + 0x4c, buf, 32);
-    BIGNUM* y =  BN_bin2bn( buf, 32, NULL);
+    BIGNUM* x = make_bignum(info->x);
+    BIGNUM* y = make_bignum(info->y);
 
     printf("x: %s\ny: %s\n", BN_bn2hex(x), BN_bn2hex(y));
     
@@ -480,11 +617,11 @@ void parse_tls_ecdh(byte* body, int len) {
     }
 
     puts("key");
-    print_hex(key, 0x90);
+    print_hex(info->key, 0x90); 
     puts("sig");
-    print_hex(sig, sig_len);
+    print_hex(info->sig, info->sig_len);
     puts("zeros");
-    print_hex(zeros, len-sig_len);
+    print_hex(zeros, len-info->sig_len);
     
 
     for(byte* end = body + len; zeros < end; zeros++) {
@@ -501,34 +638,23 @@ void parse_tls_ecdh(byte* body, int len) {
         puts("FAILED TO CREATE KEY");
         exit(1);
     }
-    byte fw_x_raw[32] = { 0xf7, 0x27, 0x65, 0x3b, 0x4e, 0x16, 0xce, 0x06, 0x65, 0xa6, 0x89, 0x4d, 0x7f, 0x3a, 0x30, 0xd7, 0xd0, 0xa0, 0xbe, 0x31, 0x0d, 0x12, 0x92, 0xa7, 0x43, 0x67, 0x1f, 0xdf, 0x69, 0xf6, 0xa8, 0xd3 };
-    byte fw_y_raw[32] = { 0xa8, 0x55, 0x38, 0xf8, 0xb6, 0xbe, 0xc5, 0x0d, 0x6e, 0xef, 0x8b, 0xd5, 0xf4, 0xd0, 0x7a, 0x88, 0x62, 0x43, 0xc5, 0x8b, 0x23, 0x93, 0x94, 0x8d, 0xf7, 0x61, 0xa8, 0x47, 0x21, 0xa6, 0xca, 0x94 };
 
-    BIGNUM* fw_x = BN_bin2bn( fw_x_raw, 32, NULL);  
-    BIGNUM* fw_y = BN_bin2bn( fw_y_raw, 32, NULL);  
-    
-    print_hex(fw_x_raw, 32);
-    printf("x: %s\ny: %s\n", BN_bn2hex(fw_x), BN_bn2hex(fw_y));
-    
+    BIGNUM* fw_x = make_bignum( 0xf727653b4e16ce0665a6894d7f3a30d7d0a0be310d1292a743671fdf69f6a8d3 );  
+    BIGNUM* fw_y = make_bignum( 0xa85538f8b6bec50d6eef8bd5f4d07a886243c58b2393948df761a84721a6ca94 );  
 
     if (! EC_KEY_set_public_key_affine_coordinates(fwpub, fw_x, fw_y))  {
         puts("FAILED TO SET KEY fwpub");
         exit(1);
     }
-    // why is the data hashed? is this common?
+    
     byte key_hash[SHA256_DIGEST_LENGTH];
-    hash_sha256(key, 0x90, key_hash);
+    hash_sha256(info->key, 0x90, key_hash);
 
-    int verify = ECDSA_verify(0, key_hash, SHA256_DIGEST_LENGTH, sig, sig_len, fwpub);
-    if ( verify == 1 ) {
-       puts("verified signature");
-    } else if (verify == 0) {
-        puts("invalid signature");
-        exit(1);
-    } else {
-        puts("ERROR while verifying signature");
-        exit(1);
-    }
+    int verify = ECDSA_verify(0, key_hash, SHA256_DIGEST_LENGTH, info->sig, info->sig_len, fwpub);
+    if ( verify == 1 ) puts("verified signature");
+    else if (verify == 0) throw_error("invalid signature");
+    else throw_error("ERROR while verifying signature");
+    
     puts("parsed ecdh block");
 }
 
@@ -633,6 +759,8 @@ void open_usb_device() {
 
 int main(int argc, char *argv[]) {
     puts("Prototype version 15");
+        loadBiosData();
+
     libusb_init(NULL);
     libusb_set_debug(NULL, 3);
 
@@ -650,12 +778,11 @@ int main(int argc, char *argv[]) {
     err(libusb_set_configuration(dev, 1));
     err(libusb_claim_interface(dev, 0));
 
-   
 
 
     init_flash();
     
-    loadBiosData();
+    
 
     puts("");
 
