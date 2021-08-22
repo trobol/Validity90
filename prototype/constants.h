@@ -25,9 +25,13 @@
 
 typedef unsigned int dword;
 typedef unsigned char byte;
+typedef unsigned short word;
 
 #define MASK_VARIABLE (1 << 30)
 #define M(x) (MASK_VARIABLE | x)
+
+#define CMD_ID_READ_PARTITION 0x43
+#define CMD_ID_READ
 
 static byte init_sequence_msg1[] = { 0x01 };
 static byte init_sequence_msg2[] = { 0x19 };

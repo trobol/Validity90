@@ -74,5 +74,6 @@ Thumbs.db
 *.raw
 *.pro
 prototype
+rewrite
 test/gtest
 test/gtest.out.c

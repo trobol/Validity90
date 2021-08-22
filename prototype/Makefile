@@ -17,7 +17,14 @@ CFLAGS += $(shell pkg-config --cflags $(LIBS))
 LDFLAGS += $(shell pkg-config --libs $(LIBS)) -lgcrypt
 
 all: $(EXECUTABLE)
- 
+
+
+rewrite: $(OBJECTS) main_rewrite.o
+	$(CC) $(OBJECTS) main_rewrite.o -o $@ $(LDFLAGS)
+
+main_rewrite.o: main_rewrite.c $(HEADERS)
+	$(CC) $(CFLAGS) -w $< -o $@
+
 $(EXECUTABLE): $(OBJECTS) main.o
 	$(CC) $(OBJECTS) main.o -o $@ $(LDFLAGS)
  
