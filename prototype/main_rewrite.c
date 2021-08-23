@@ -721,24 +721,124 @@ void parse_tls_flash() {
     }
 }
 
+
+byte* make_handshake(byte* data, word data_len) {
+   
+    byte prefix[3 + 2] = { 0x16, 0x03, 0x03, 0x00, 0x00 };
+    *(word*)(prefix + 3) = data_len;
+
+    byte* ret = (byte*)malloc( 3 + 2 + data_len);
+    memcpy(ret, prefix, 5);
+    memcpy(ret + 5, data, data_len);
+
+    return ret;
+}
+
+
+
+struct tls_cmd_start {
+    byte prefix[4];
+    byte hdr[3];
+    word size;
+} __attribute__((packed)); 
+
 struct tls_client_hello {
-    byte id[2];
+    byte id[2]; // TLS 1.2
     byte client_random[32];
-    byte session_id_len;
-    byte session_id[7];
+    byte session_id_len; 
+    byte session_id[7]; // 0
+
+    word suites_len;
+    word suites[3];
+
+    byte compr_op_len;
+    byte compr_op[0];
     
+    word exts_len;
+
+    word ext0_id;
+    word ext0_len;
+    byte ext0_data[2];
+
+    word ext1_id;
+    word ext1_len;
+    byte ext1_data[2];
+
 } __attribute__((packed));
 
-void open_tls() {
-    byte rsp[1024 * 1024];
+void urandom(byte* out, int len) {
+    if (RAND_load_file("/dev/random", 32) != 32) throw_error("RAND_load_file failed");
+    if (RAND_bytes(out, len) != 1) throw_error("RAND_bytes failed");
+}
 
-    // make_client_hello
+// buf must have 4 bytes of room in front
+// data_len is not buf len
+void with_neg_hdr(byte t, byte* buf, dword data_len) {
+    buf[0] = t;
+    buf[1] = (byte)(data_len >> 16);
+    buf[2] = (byte)(data_len >> 8);
+    buf[3] = (byte)(data_len);
+}
+
+// buf must have 4 bytes of room in front
+void add_prefix(byte* buf) {
+    byte prefix[4] = { 0x44, 0x00, 0x00, 0x00 };
+    memcpy(buf, prefix, 4);
+}
+
+void open_tls() {
+    
+    
+    // prefix + handshake + size + neg_hdr + 
+    byte buf[ 4 + 3 + 2 + 4 + sizeof(struct tls_client_hello)];
+
+    struct {
+        struct tls_cmd_start start;
+        byte neg[4];
+        struct tls_client_hello hello;
+    } __attribute__((packed)) cmd;
 
     
+    cmd.hello = (struct tls_client_hello){
+      id: { 0x03, 0x03 },
+      session_id_len: 0,
+      session_id: { 0, 0, 0, 0, 0, 0, 0},
+      suites_len: 3,
+      suites: {
+        0xc005,  // TLS_ECDH_ECDSA_WITH_AES_256_CBC_SHA
+        0x003d,  // TLS_RSA_WITH_AES_256_CBC_SHA256
+        0x008d,  // TLS_RSA_WITH_AES_256_CBC_SHA256
+      },
+      compr_op_len: 0,
 
-    usb_cmd();
+      exts_len: 10,
+      ext0_id: TLSEXT_TYPE_truncated_hmac,
+      ext0_len: 2,
+      ext0_data: { 0x17, 0x00 },
+      ext1_id: TLSEXT_TYPE_ec_point_formats,
+      ext1_len: 2,
+      ext0_data: { 0x01, 0x00 } // uncompressed
+    };
+
+    urandom(cmd.hello.client_random, 32);
+    with_neg_hdr(0x01, cmd.neg, sizeof(struct tls_client_hello));
+    
+    cmd.start = (struct tls_cmd_start) {
+        prefix: { 0x44, 0x00, 0x00, 0x00 },
+        hdr: { 0x16, 0x03, 0x03 },
+        size: sizeof(struct tls_client_hello) + 2
+    };
+
+    int rsp_len;
+    byte rsp[1024 * 1024];
+
+    usb_cmd(&cmd, sizeof(cmd), rsp, 1024 * 1024, &rsp_len);
+
+
 
 }
+
+
 
 
 void open_usb_device() {
