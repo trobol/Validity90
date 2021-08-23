@@ -543,7 +543,7 @@ void parse_tls_priv(byte* body, int len) {
     print_hex(d, 32);
 
     // "Someone has reported that x and y are 0 after pairing with the latest windows driver."
-    // so we are just gonna derrive the public keys
+    // so we are just gonna calculate the public keys
 
     // "Note that in [PKI-ALG] ... the secp256r1 curve was referred to as prime256v1." https://www.ietf.org/rfc/rfc5480.txt
     const EC_KEY* key = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
@@ -721,6 +721,24 @@ void parse_tls_flash() {
     }
 }
 
+struct tls_client_hello {
+    byte id[2];
+    byte client_random[32];
+    byte session_id_len;
+    byte session_id[7];
+    
+} __attribute__((packed));
+
+void open_tls() {
+    byte rsp[1024 * 1024];
+
+    // make_client_hello
+
+    
+
+    usb_cmd();
+
+}
 
 
 void open_usb_device() {
