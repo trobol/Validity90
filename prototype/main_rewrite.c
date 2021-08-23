@@ -491,29 +491,6 @@ void hash_sha256(byte *in, int len, byte* out) {
 }
 
 
-EC_KEY* derive_private_key(byte* d) {
-    // "Note that in [PKI-ALG] ... the secp256r1 curve was referred to as prime256v1." https://www.ietf.org/rfc/rfc5480.txt
-    const EC_KEY* key = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
-    const EC_GROUP* group = EC_KEY_get0_group(key);
-
-    const BN_CTX* bn_ctx = BN_CTX_new();
-    const BIGNUM* prv = make_bignum(d);
-    const EC_POINT* pub = EC_POINT_new(group);
-    
-
-
-    BN_CTX_start(bn_ctx);
-    EC_POINT_mul(group, pub, prv, NULL, NULL, bn_ctx);
-
-
- 
-    EC_KEY_set_private_key(key, prv);
-    EC_KEY_set_public_key(key, pub);
-    
-    BN_CTX_free(bn_ctx);
-    return key;
-} 
-
 
 struct tls_priv_info {
     byte prefix;
@@ -566,12 +543,28 @@ void parse_tls_priv(byte* body, int len) {
     print_hex(d, 32);
 
     // "Someone has reported that x and y are 0 after pairing with the latest windows driver."
-    //pub_key = ec.EllipticCurvePublicNumbers(x, y, ec.SECP256R1())
-    //elf.priv_key = ec.EllipticCurvePrivateNumbers(d, pub_key).private_key(crypto_backend)
+    // so we are just gonna derrive the public keys
+
+    // "Note that in [PKI-ALG] ... the secp256r1 curve was referred to as prime256v1." https://www.ietf.org/rfc/rfc5480.txt
+    const EC_KEY* key = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+    const EC_GROUP* group = EC_KEY_get0_group(key);
+
+    const BN_CTX* bn_ctx = BN_CTX_new();
+    const BIGNUM* prv = make_bignum(d);
+    const EC_POINT* pub = EC_POINT_new(group);
+    
+
+    BN_CTX_start(bn_ctx);
+    EC_POINT_mul(group, pub, prv, NULL, NULL, bn_ctx);
 
 
+ 
+    EC_KEY_set_private_key(key, prv);
+    EC_KEY_set_public_key(key, pub);
+    
+    BN_CTX_free(bn_ctx);
 
-    EC_KEY* key = derive_private_key(d);
+
 }
 
 struct tls_ecdh_info {
