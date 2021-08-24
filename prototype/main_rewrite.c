@@ -201,7 +201,7 @@ byte psk_validation_key[32];
 
 
 
-// out must be out_len bytes long
+// secret is 32 bytes? out must be out_len bytes long
 void prf(byte* secret, byte* seed, int seed_len, byte* out, int len) {
 
     
@@ -474,6 +474,32 @@ rom_info get_rom_info() {
  *
  */
 
+static bool g_secure_tx = false;
+static bool g_secure_rx = false;
+
+static byte* g_tls_cert;
+static word g_tls_cert_len;
+
+
+static byte g_srv_random[32];
+
+static word g_srv_sessid_len;
+static byte *g_srv_sessid;
+
+static byte g_client_random[32];
+
+static EC_KEY* g_ecdh_q;
+
+
+static struct {
+    byte sign_key[32];
+    byte validation_key[32];
+    byte encryption_key[32];
+    byte decryption_key[32];
+    byte unknown0[160];
+} g_key_block;
+
+
 BIGNUM* make_bignum(byte* n) {
     return BN_lebin2bn( n, 32, NULL);
 }
@@ -600,14 +626,12 @@ void parse_tls_ecdh(byte* body, int len) {
 
     // "Note that in [PKI-ALG] ... the secp256r1 curve was referred to as prime256v1." https://www.ietf.org/rfc/rfc5480.txt
     EC_KEY* pubkey = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
-    if (pubkey == NULL) {
-        puts("FAILED TO CREATE KEY");
-        exit(1);
-    }
-    if (! EC_KEY_set_public_key_affine_coordinates(pubkey, x, y)) {
-        puts("FAILED TO SET KEY pubkey");
-        exit(1);
-    }
+    if (pubkey == NULL)
+        throw_error("FAILED TO CREATE KEY");
+    if (! EC_KEY_set_public_key_affine_coordinates(pubkey, x, y))
+        throw_error("FAILED TO SET KEY pubkey");
+
+    g_ecdh_q = pubkey;
 
     puts("key");
     print_hex(info->key, 0x90); 
@@ -658,6 +682,10 @@ void parse_tls_ecdh(byte* body, int len) {
 
 void parse_tls_cert(byte* body, int len) {
     puts("found cert block");
+    // TODO: validate cert, check if pub keys match
+    g_tls_cert = malloc(len);
+    g_tls_cert_len = len;
+    memcpy(g_tls_cert, body, len);
 }
 
 void parse_tls_empty(byte* body, int len) {
@@ -667,7 +695,6 @@ void parse_tls_empty(byte* body, int len) {
         exit(1);
     }
 }
-
 
 
 void parse_tls_flash() {
@@ -722,6 +749,36 @@ void parse_tls_flash() {
 }
 
 
+
+void make_keys() {
+    EC_KEY* key = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+    // TODO: get session_public
+    if ( EC_KEY_generate_key(key) != 1) throw_error("unable to generate key");
+
+    byte pre_master_secret[32];
+    byte master_secret[0x30];
+    byte seed0_prefix[13] = "master secret";
+    byte seed1_prefix[13] = "key expansion";
+    byte seed[32 + 32 + 13];
+
+    const EC_POINT* peer_pub_key = EC_KEY_get0_public_key(g_ecdh_q);
+    dword secret_len = ECDH_compute_key(pre_master_secret, 32, peer_pub_key, key, NULL);
+    if (secret_len != 32) throw_error("secret length wasn't 32");
+    
+   
+    memcpy(seed + 13, g_client_random, 32);
+    memcpy(seed + 13 + 32, g_srv_random, 32);
+
+    memcpy(seed, "master secret", 13);
+    prf(pre_master_secret, seed, 64 + 13, master_secret, sizeof(master_secret));
+
+    memcpy(seed, "key expansion", 13);
+    prf(master_secret, seed, 64 + 13, &g_key_block, sizeof(g_key_block));
+
+    
+
+}
+
 byte* make_handshake(byte* data, word data_len) {
    
     byte prefix[3 + 2] = { 0x16, 0x03, 0x03, 0x00, 0x00 };
@@ -734,12 +791,10 @@ byte* make_handshake(byte* data, word data_len) {
     return ret;
 }
 
-
-
 struct tls_cmd_start {
     byte prefix[4];
     byte hdr[3];
-    word size;
+    byte size[2];
 } __attribute__((packed)); 
 
 struct tls_client_hello {
@@ -748,20 +803,20 @@ struct tls_client_hello {
     byte session_id_len; 
     byte session_id[7]; // 0
 
-    word suites_len;
-    word suites[3];
+    byte suites_len[2];
+    byte suites[4];
 
     byte compr_op_len;
-    byte compr_op[0];
+    //byte compr_op[0];
     
-    word exts_len;
+    byte exts_len[2];
 
-    word ext0_id;
-    word ext0_len;
+    byte ext0_id[2];
+    byte ext0_len[2];
     byte ext0_data[2];
 
-    word ext1_id;
-    word ext1_len;
+    byte ext1_id[2];
+    byte ext1_len[2];
     byte ext1_data[2];
 
 } __attribute__((packed));
@@ -771,9 +826,14 @@ void urandom(byte* out, int len) {
     if (RAND_bytes(out, len) != 1) throw_error("RAND_bytes failed");
 }
 
+struct neg_hdr {
+    byte type;
+    byte size[3];
+};
+
 // buf must have 4 bytes of room in front
 // data_len is not buf len
-void with_neg_hdr(byte t, byte* buf, dword data_len) {
+void with_neg_hdr(byte* neg_hdr, byte t, dword data_len) {
     buf[0] = t;
     buf[1] = (byte)(data_len >> 16);
     buf[2] = (byte)(data_len >> 8);
@@ -788,11 +848,15 @@ void add_prefix(byte* buf) {
 
 void open_tls() {
     
+    g_secure_rx = false;
+    g_secure_tx = false;
     
+
+
     // prefix + handshake + size + neg_hdr + 
     byte buf[ 4 + 3 + 2 + 4 + sizeof(struct tls_client_hello)];
 
-    struct {
+    struct cmd_type {
         struct tls_cmd_start start;
         byte neg[4];
         struct tls_client_hello hello;
@@ -801,32 +865,34 @@ void open_tls() {
     
     cmd.hello = (struct tls_client_hello){
       id: { 0x03, 0x03 },
-      session_id_len: 0,
+      session_id_len: 7,
       session_id: { 0, 0, 0, 0, 0, 0, 0},
-      suites_len: 3,
+      suites_len: { 0x00, 0x04 }, // 4 big endian,
       suites: {
-        0xc005,  // TLS_ECDH_ECDSA_WITH_AES_256_CBC_SHA
-        0x003d,  // TLS_RSA_WITH_AES_256_CBC_SHA256
-        0x008d,  // TLS_RSA_WITH_AES_256_CBC_SHA256
+        0xc0, 0x05,  // TLS_ECDH_ECDSA_WITH_AES_256_CBC_SHA
+        0x00, 0x3d,  // TLS_RSA_WITH_AES_256_CBC_SHA256
+        //0x00, 0x8d,  python-validity has this but it wasn't working for me
       },
       compr_op_len: 0,
 
-      exts_len: 10,
-      ext0_id: TLSEXT_TYPE_truncated_hmac,
-      ext0_len: 2,
-      ext0_data: { 0x17, 0x00 },
-      ext1_id: TLSEXT_TYPE_ec_point_formats,
-      ext1_len: 2,
-      ext0_data: { 0x01, 0x00 } // uncompressed
+      exts_len: { 0x00, 0x0a },
+      ext0_id: { 0x00, TLSEXT_TYPE_truncated_hmac },
+      ext0_len: { 0x00, 0x02},
+      ext0_data: { 0x00, 0x17 },
+      ext1_id: { 0x00, TLSEXT_TYPE_ec_point_formats },
+      ext1_len: { 0x00, 0x02 },
+      ext1_data: { 0x01, 0x00 } // uncompressed
     };
 
-    urandom(cmd.hello.client_random, 32);
+
+    urandom(g_client_random, 32);
+    memcpy(cmd.hello.client_random, g_client_random, 32);
     with_neg_hdr(0x01, cmd.neg, sizeof(struct tls_client_hello));
     
     cmd.start = (struct tls_cmd_start) {
         prefix: { 0x44, 0x00, 0x00, 0x00 },
         hdr: { 0x16, 0x03, 0x03 },
-        size: sizeof(struct tls_client_hello) + 2
+        size: { 0x00, 0x43 }
     };
 
     int rsp_len;
@@ -834,11 +900,182 @@ void open_tls() {
 
     usb_cmd(&cmd, sizeof(cmd), rsp, 1024 * 1024, &rsp_len);
 
+    parse_tls_response(rsp, rsp_len);
+
+    make_keys();
+    /*
+    puts("0000");
+    print_hex(&cmd, 4);
+    puts("0004");
+    print_hex(&cmd.start.hdr, 11);
+    puts("000f-002e random");
+    puts("002f");
+    print_hex(&cmd.hello.session_id_len, 1);
+    puts("0030");
+    print_hex(&cmd.hello.session_id, sizeof(cmd) - offsetof(struct cmd_type, hello.session_id));
+    */
+
+   // certificate message
+   // make_certs
+
+   // cert
+   struct {
+       struct tls_cmd_start start; // 9 bytes
+       byte neg[4];
+
+
+   };
+   struct cert_packet {
+       byte neg[4];
+       byte pad0;
+       word len0;
+       byte pad1;
+       word len1; // len of tls_cert
+       byte unknown0[2];
+       
+   };
+   // 2 byte "ac16"
+   // 3 byte len(cert)
+   // x bytes 
+
 
 
 }
 
 
+void handle_server_hello(byte* data, int data_len) {
+    byte* end = data + data_len;
+
+    byte major = *(data++);
+    byte minor = *(data++);
+
+    byte* local_srv_random = data;
+    data += 32;
+    byte local_srv_sessid_len = *(data++);
+    byte* local_srv_sessid = data;
+    data += local_srv_sessid_len;
+    byte suite0 = *(data++);
+    byte suite1 = *(data++);
+    byte compr  = *(data++);
+    
+    if ( suite0 != 0xc0 || suite1 != 0x05 ) 
+        throw_error("server accepted unsupported cipher suite");
+
+    if ( compr != 0 )
+        throw_error("server selected to enable compression, which we don't support");
+
+    if ( data < end )
+        throw_error("more data than expected");
+
+    g_srv_sessid = (byte*)malloc(local_srv_sessid_len);
+
+    memcpy(g_srv_random, local_srv_random, 32);
+    memcpy(g_srv_sessid, local_srv_sessid, local_srv_sessid_len);
+    g_srv_sessid_len = local_srv_sessid_len;
+}
+
+void handle_cert_req(byte* data, int data_len) {
+    if ( data[0] != 0x01 || data[1] != 0x40) 
+        throw_error("Server requested a cert with an unsupported sign and hash algo combination");
+
+    if ( data[2] != 0x00 || data[3] != 0x00)
+        throw_error("Server requested a cert with non-empty list of CAs");
+    
+    if ( data_len != 4)
+        throw_error("unexpected length of data");
+}
+
+
+void handle_finish(byte* data, int data_len) {
+    puts("handle_finish");
+}
+
+struct tls_handshake_packet {
+    byte type;
+    byte unknown;
+    byte size_bytes[2];
+    byte data[];
+} __attribute__((packed));
+
+void handle_handshake(byte* data, word data_len) {
+    // validate if (secure_tx)
+    
+    byte* end = data+data_len;
+    while ( data < end ) {
+        if (end - data < 4) throw_error("handshake ended unexpectedly");
+
+        
+        struct tls_handshake_packet *packet = data;
+        word size = (packet->size_bytes[0] << 8) | packet->size_bytes[1];
+        data += sizeof(struct tls_handshake_packet) + size;
+
+        switch (packet->type)
+        {
+        case 0x02:
+            handle_server_hello(packet->data, size);
+            break;
+        case 0x0d:
+            handle_cert_req(packet->data, size);
+            break;
+        case 0x0e:
+            if ( size != 0) throw_error("not expecting any more data");
+            break;
+        case 0x14:
+            handle_finish(packet->data, size);
+            break;
+        
+        default:
+            printf("unknown handshake packet: %x\n", packet->type);
+            throw_error("unable to process packet");
+        }
+        
+    }
+}
+
+void handle_appdata(byte* data, int data_len) {
+
+}
+
+
+struct tls_plain_text {
+    byte type;
+    byte major;
+    byte minor;
+    byte size_bytes[2];
+    byte fragment[];
+} __attribute__((packed));
+
+
+void parse_tls_response(byte* rsp, int rsp_len) {
+    byte* end = rsp + rsp_len;
+    while (rsp < end) {
+        if (end - rsp < 5) throw_error("tsl response ended unexpectedly");
+
+        struct tls_plain_text *packet = rsp;
+        word size = (packet->size_bytes[0] << 8) | packet->size_bytes[1];
+        rsp += sizeof(struct tls_plain_text) + size;
+
+
+        if (packet->major != 3 || packet->minor != 3) throw_error("unexpected tls version");
+
+        if (packet->type == 0x14) {
+            if ( packet->fragment == 0x01)
+                throw_error("unexpected ChangeCipherSpec payload");
+        } 
+        else if ( packet->type == 0x16) {
+            handle_handshake(packet->data, size);
+        } 
+        else if ( packet->type == 0x17) {
+            handle_appdata(packet->data, size);
+        }
+        else {
+            printf("unknown message type: %x\n", packet->type);
+            throw_error("dont know how to handle message type");
+        }
+        
+
+    }
+}
 
 
 void open_usb_device() {
@@ -911,6 +1148,8 @@ int main(int argc, char *argv[]) {
     send_init();
 
     parse_tls_flash();
+
+    open_tls();
     //init();
     //handshake();
 
