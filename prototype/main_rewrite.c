@@ -827,19 +827,6 @@ void urandom(byte* out, int len) {
     if (RAND_bytes(out, len) != 1) throw_error("RAND_bytes failed");
 }
 
-struct neg_hdr {
-    byte type;
-    byte size[3];
-};
-
-// buf must have 4 bytes of room in front
-// data_len is not buf len
-void with_neg_hdr(byte* neg_hdr, byte t, dword data_len) {
-    buf[0] = t;
-    buf[1] = (byte)(data_len >> 16);
-    buf[2] = (byte)(data_len >> 8);
-    buf[3] = (byte)(data_len);
-}
 
 // buf must have 4 bytes of room in front
 void add_prefix(byte* buf) {
@@ -1026,10 +1013,10 @@ void parse_tls_response(byte* rsp, int rsp_len) {
                 throw_error("unexpected ChangeCipherSpec payload");
         } 
         else if ( packet->type == 0x16) {
-            handle_handshake(packet->data, size);
+            handle_handshake(packet->fragment, size);
         } 
         else if ( packet->type == 0x17) {
-            handle_appdata(packet->data, size);
+            handle_appdata(packet->fragment, size);
         }
         else {
             printf("unknown message type: %x\n", packet->type);
@@ -1078,7 +1065,7 @@ void open_usb_device() {
 
 int main(int argc, char *argv[]) {
     puts("Prototype version 15");
-        loadBiosData();certificate_authorities
+        loadBiosData();
 
     libusb_init(NULL);
     libusb_set_debug(NULL, 3);

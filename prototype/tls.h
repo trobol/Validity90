@@ -61,7 +61,7 @@ typedef struct {
     ClientKeyExchange
     Finished
     */
-} Handshake;
+} __attribute__((packed)) Handshake;
 
 #define TLS_EXTENSION_TYPE_TRUNC_HMAC 0x0400
 #define TLS_EXTENSION_TYPE_EC_POINTS_FORMAT 0x1100
@@ -70,12 +70,12 @@ typedef struct {
     uint16_t extension_type;
     uint16_t length; // 2 
     uint8_t  data[2];
-} Extension;
+} __attribute__((packed)) Extension;
 
 typedef struct {
     uint8_t len; // 7
     uint8_t data[7];
-} SessionID;
+} __attribute__((packed)) SessionID;
 
 typedef struct {
     ProtocolVersion client_version;
@@ -93,7 +93,7 @@ typedef struct {
     
     Extension extensions[2];
 
-} ClientHello;
+} __attribute__((packed)) ClientHello;
 
 
 typedef struct {
@@ -103,16 +103,18 @@ typedef struct {
     uint16_t cipher_suite;
     uint8_t compression_method;
     // shouldn't be any more data, extensions not supported
-} ServerHello;
+} __attribute__((packed)) ServerHello;
 
+/*
 typedef struct {
     uint8_t certificate_list[];
 } Certificate;
-
-
+*/
+/*
 typedef struct {
     uint8_t dh_public[];
 } ClientKeyExchange;
+*/
 
 #define TLS_HASH_ALGORITHM_NONE 0
 #define TLS_HASH_ALGORITHM_MD5  1
@@ -130,28 +132,30 @@ typedef struct {
 typedef struct {
     uint8_t hash;
     uint8_t signature;
-} SignatureAndHashAlgorithm;
+} __attribute__((packed)) SignatureAndHashAlgorithm;
 
 // digitally signed struct
 typedef struct {
     SignatureAndHashAlgorithm algorithm;
     uint8_t handshake_messages[];
-} CertificateVerify;
+} __attribute__((packed)) CertificateVerify;
 
 typedef struct {
     uint8_t type;
-} ChangeCipherSpec;
+} __attribute__((packed)) ChangeCipherSpec;
 
+/*
 typedef struct {
     uint8_t verify_data[];
 } Finished;
+*/
 
 typedef struct {
     uint16_t certificate_types_cout; // 1
     uint8_t certificate_type;
     uint16_t certificate_authorities_len;
     uint8_t certificate_authorities[];
-} CertificateRequest;
+} __attribute__((packed)) CertificateRequest;
 
 /*
 
@@ -196,8 +200,8 @@ void build_client_hello(TLSPlaintext* out, uint8_t* client_random) {
     TLSPlaintext_init(out, TLS_PLAINTEXT_TYPE_HANDSHAKE, TLS_CLIENT_HELLO_SIZE);
     Handshake_init(handshake, TLS_HANDSHAKE_TYPE_CLIENT_HELLO, sizeof(ClientHello));
 
-    hello->client_version = { 0x03, 0x03 };
-    hello->session_id = { 7, {} };
+    hello->client_version = (ProtocolVersion){ 0x03, 0x03 };
+    hello->session_id = (SessionID){ 7, {} };
     hello->cipher_suites_len = 0x0400; // 4 little endian
     hello->cipher_suites[0] = 0x05c0;
     hello->cipher_suites[1] = 0x3d00;
