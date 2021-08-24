@@ -25,6 +25,7 @@
 #include <openssl/ecdh.h>
 #include "constants.h"
 
+#include "tls.h"
 
 #define xstr(a) str(a)
 #define str(a) #a
@@ -852,53 +853,15 @@ void open_tls() {
     g_secure_tx = false;
     
 
-
-    // prefix + handshake + size + neg_hdr + 
-    byte buf[ 4 + 3 + 2 + 4 + sizeof(struct tls_client_hello)];
-
-    struct cmd_type {
-        struct tls_cmd_start start;
-        byte neg[4];
-        struct tls_client_hello hello;
-    } __attribute__((packed)) cmd;
-
-    
-    cmd.hello = (struct tls_client_hello){
-      id: { 0x03, 0x03 },
-      session_id_len: 7,
-      session_id: { 0, 0, 0, 0, 0, 0, 0},
-      suites_len: { 0x00, 0x04 }, // 4 big endian,
-      suites: {
-        0xc0, 0x05,  // TLS_ECDH_ECDSA_WITH_AES_256_CBC_SHA
-        0x00, 0x3d,  // TLS_RSA_WITH_AES_256_CBC_SHA256
-        //0x00, 0x8d,  python-validity has this but it wasn't working for me
-      },
-      compr_op_len: 0,
-
-      exts_len: { 0x00, 0x0a },
-      ext0_id: { 0x00, TLSEXT_TYPE_truncated_hmac },
-      ext0_len: { 0x00, 0x02},
-      ext0_data: { 0x00, 0x17 },
-      ext1_id: { 0x00, TLSEXT_TYPE_ec_point_formats },
-      ext1_len: { 0x00, 0x02 },
-      ext1_data: { 0x01, 0x00 } // uncompressed
-    };
-
+    byte hello_msg[TLS_CLIENT_HELLO_SIZE];
 
     urandom(g_client_random, 32);
-    memcpy(cmd.hello.client_random, g_client_random, 32);
-    with_neg_hdr(0x01, cmd.neg, sizeof(struct tls_client_hello));
-    
-    cmd.start = (struct tls_cmd_start) {
-        prefix: { 0x44, 0x00, 0x00, 0x00 },
-        hdr: { 0x16, 0x03, 0x03 },
-        size: { 0x00, 0x43 }
-    };
+    build_client_hello(hello_msg, g_client_random);
 
     int rsp_len;
     byte rsp[1024 * 1024];
 
-    usb_cmd(&cmd, sizeof(cmd), rsp, 1024 * 1024, &rsp_len);
+    usb_cmd(hello_msg, TLS_CLIENT_HELLO_SIZE, rsp, 1024 * 1024, &rsp_len);
 
     parse_tls_response(rsp, rsp_len);
 
@@ -1115,7 +1078,7 @@ void open_usb_device() {
 
 int main(int argc, char *argv[]) {
     puts("Prototype version 15");
-        loadBiosData();
+        loadBiosData();certificate_authorities
 
     libusb_init(NULL);
     libusb_set_debug(NULL, 3);
