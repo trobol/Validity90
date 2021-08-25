@@ -749,12 +749,28 @@ void parse_tls_flash() {
     }
 }
 
-
+static byte g_session_public_keys[1 + 32 + 32];
 
 void make_keys() {
+
+   
     EC_KEY* key = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
-    // TODO: get session_public
+    EC_GROUP* group = EC_KEY_get0_group(key);
+  
     if ( EC_KEY_generate_key(key) != 1) throw_error("unable to generate key");
+
+    BN_CTX* bn_ctx = BN_CTX_new();
+    BIGNUM* bn_x = BN_new();
+    BIGNUM* bn_y = BN_new();
+    EC_POINT* point = EC_KEY_get0_public_key(key);
+
+    if ( EC_POINT_get_affine_coordinates_GFp(group, point, bn_x, bn_y, bn_ctx) )
+        throw_error("failed to get coords");
+
+    BN_bn2bin(bn_x, g_session_public_keys + 1);
+    BN_bn2bin(bn_y, g_session_public_keys + 1 + 32);
+
+ 
 
     byte pre_master_secret[32];
     byte master_secret[0x30];
@@ -766,7 +782,7 @@ void make_keys() {
     dword secret_len = ECDH_compute_key(pre_master_secret, 32, peer_pub_key, key, NULL);
     if (secret_len != 32) throw_error("secret length wasn't 32");
     
-   
+    g_session_public_keys[0] = 0x04;
     memcpy(seed + 13, g_client_random, 32);
     memcpy(seed + 13 + 32, g_srv_random, 32);
 
@@ -777,7 +793,13 @@ void make_keys() {
     prf(master_secret, seed, 64 + 13, &g_key_block, sizeof(g_key_block));
 
     
-
+    BN_free(bn_x);
+    BN_free(bn_y);
+    EC_POINT_free(point);
+    EC_POINT_free(peer_pub_key);
+    BN_CTX_free(bn_ctx);
+    EC_GROUP_free(group);
+    EC_KEY_free(key);
 }
 
 byte* make_handshake(byte* data, word data_len) {
@@ -827,14 +849,33 @@ void urandom(byte* out, int len) {
     if (RAND_bytes(out, len) != 1) throw_error("RAND_bytes failed");
 }
 
-
+/*
+int SHA256_Update(SHA256_CTX *c, const void *data, size_t len);
+ int SHA256_Final(unsigned char *md, SHA256_CTX *c);
+*/
 // buf must have 4 bytes of room in front
 void add_prefix(byte* buf) {
     byte prefix[4] = { 0x44, 0x00, 0x00, 0x00 };
     memcpy(buf, prefix, 4);
 }
 
+void update_handshake_hash(SHA256_CTX* ctx, byte* buf) {
+    TLSPlaintext* msg = buf;
+    if ( msg->type != TLS_PLAINTEXT_TYPE_HANDSHAKE) throw_error("expected message to be a handshake");
+    
+    Handshake* handshake = msg->fragment;
+
+    while(handshake < msg->fragment + msg->length) {
+        uint32_t length = (((uint32_t)handshake->length[0] << 16) | ((uint32_t)handshake->length[1] << 8) | handshake->length[2]) + 4;
+        if ( SHA256_Update(ctx, handshake->body, length) != 1) throw_error("failed to update hash");
+        handshake = ((uint8_t*)handshake) + length;
+    }
+}
+
+
 void open_tls() {
+    SHA256_CTX* ctx;
+    SHA256_Init(ctx);
     
     g_secure_rx = false;
     g_secure_tx = false;
@@ -845,14 +886,28 @@ void open_tls() {
     urandom(g_client_random, 32);
     build_client_hello(hello_msg, g_client_random);
 
+    update_handshake_hash(ctx, hello_msg + 4);
+
     int rsp_len;
     byte rsp[1024 * 1024];
 
     usb_cmd(hello_msg, TLS_CLIENT_HELLO_SIZE, rsp, 1024 * 1024, &rsp_len);
 
     parse_tls_response(rsp, rsp_len);
+    update_handshake_hash(ctx, rsp);
 
     make_keys();
+
+
+    uint8_t* handshake_buf;
+    int handshake_buf_len;
+
+
+
+    build_client_handshake(ctx, &handshake_buf, &handshake_buf_len, g_tls_cert, g_tls_cert_len, g_session_public_keys, 65);
+
+    usb_cmd(handshake_buf, handshake_buf_len, rsp, 1024 * 1024, &rsp_len);
+
     /*
     puts("0000");
     print_hex(&cmd, 4);
