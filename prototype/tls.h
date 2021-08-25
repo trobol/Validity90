@@ -14,15 +14,15 @@
 
 
 #define TLS_PLAINTEXT_TYPE_CHANGE_CIPHER 20
-#define TLS_PLAINTEXT_TYPE_ALERT 21
-#define TLS_PLAINTEXT_TYPE_HANDSHAKE 22
+#define TLS_PLAINTEXT_TYPE_ALERT 0x15
+#define TLS_PLAINTEXT_TYPE_HANDSHAKE 0x16
 #define TLS_PLAINTEXT_TYPE_APP_DATA 23
 
 
 typedef struct {
     uint8_t major;
     uint8_t minor;
-} ProtocolVersion;
+} __attribute__((packed)) ProtocolVersion;
 
 typedef struct {
     uint32_t prefix; // specific to validity 
@@ -30,7 +30,7 @@ typedef struct {
     ProtocolVersion version;
     uint16_t length;
     uint8_t fragment[]; 
-} TLSPlaintext;
+} __attribute__((packed)) TLSPlaintext;
 
 #define TLS_HANDSHAKE_TYPE_HELLO_REQ 0
 #define TLS_HANDSHAKE_TYPE_CLIENT_HELLO 1
@@ -63,8 +63,14 @@ typedef struct {
     */
 } __attribute__((packed)) Handshake;
 
+
+typedef struct {
+    uint8_t level;
+    uint8_t description;
+} __attribute__((packed)) Alert;
+
 #define TLS_EXTENSION_TYPE_TRUNC_HMAC 0x0400
-#define TLS_EXTENSION_TYPE_EC_POINTS_FORMAT 0x1100
+#define TLS_EXTENSION_TYPE_EC_POINTS_FORMAT 0x0b00
 
 typedef struct {
     uint16_t extension_type;
@@ -182,22 +188,23 @@ typedef struct {
 #define TLS_CLIENT_HELLO_SIZE sizeof(TLSPlaintext) + sizeof(Handshake) + sizeof(ClientHello)
 
 void TLSPlaintext_init(TLSPlaintext* msg, uint8_t type, uint16_t length) {
-    msg->prefix = 0x44000000;
+    msg->prefix = 0x00000044;
     msg->type = type;
-    msg->length = length;
+    msg->version = (ProtocolVersion){ 0x03, 0x03 };
+    msg->length = (length >> 8) | (length << 8);
 }
 void Handshake_init(Handshake* out, uint8_t msg_type, uint32_t len) {
     out->msg_type = msg_type;
-    out->length[1] = (uint8_t)(len >> 16);
-    out->length[2] = (uint8_t)(len >> 8);
-    out->length[3] = (uint8_t)(len);
+    out->length[0] = len >> 16;
+    out->length[1] = len >> 8;
+    out->length[2] = len;
 }
 
 void build_client_hello(TLSPlaintext* out, uint8_t* client_random) {
     Handshake* handshake = (Handshake*)out->fragment;
     ClientHello* hello = (ClientHello*)handshake->body;
 
-    TLSPlaintext_init(out, TLS_PLAINTEXT_TYPE_HANDSHAKE, TLS_CLIENT_HELLO_SIZE);
+    TLSPlaintext_init(out, TLS_PLAINTEXT_TYPE_HANDSHAKE, sizeof(ClientHello) + sizeof(Handshake));
     Handshake_init(handshake, TLS_HANDSHAKE_TYPE_CLIENT_HELLO, sizeof(ClientHello));
 
     hello->client_version = (ProtocolVersion){ 0x03, 0x03 };
@@ -209,15 +216,15 @@ void build_client_hello(TLSPlaintext* out, uint8_t* client_random) {
     hello->extensions_len = 0x0a00;
     
     Extension* hmac = hello->extensions;
-    hmac->length = 2;
+    hmac->length = 0x0200;
     hmac->extension_type = TLS_EXTENSION_TYPE_TRUNC_HMAC;
     hmac->data[0] = 0x00;
     hmac->data[1] = 0x17;
 
     Extension* ec_formats = hello->extensions + 1;
-    ec_formats->length = 2;
+    ec_formats->length = 0x0200;
     ec_formats->extension_type = TLS_EXTENSION_TYPE_EC_POINTS_FORMAT;
-    ec_formats->data[0] = 0x00;
+    ec_formats->data[0] = 0x01;
     ec_formats->data[1] = 0x00;
     
     memcpy(hello->random, client_random, 32);

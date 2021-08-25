@@ -1017,6 +1017,9 @@ void parse_tls_response(byte* rsp, int rsp_len) {
         } 
         else if ( packet->type == 0x17) {
             handle_appdata(packet->fragment, size);
+        } else if (packet->type == TLS_PLAINTEXT_TYPE_ALERT) {
+            printf("got alert with level %hhu and descr %hhu\n", packet->fragment[0], packet->fragment[1]);
+            throw_error("got alert");
         }
         else {
             printf("unknown message type: %x\n", packet->type);
