@@ -730,7 +730,8 @@ void parse_tls_flash() {
     }
 }
 
-static byte g_session_public_keys[1 + 32 + 32];
+static TLS_PUBKEY g_session_public_x;
+static TLS_PUBKEY g_session_public_y;
 static byte g_master_secret[48];
 
 void make_keys() {
@@ -749,13 +750,12 @@ void make_keys() {
 
     if ( EC_POINT_get_affine_coordinates_GFp(group, point, bn_x, bn_y, bn_ctx) != 1)
         throw_error("failed to get coords");
-    printf("BN_NUM_BYTES: %i\n", BN_num_bytes(bn_x));
 
-    BN_bn2bin(bn_x, g_session_public_keys + 1);
-    BN_bn2bin(bn_y, g_session_public_keys + 1 + 64);
+    BN_bn2bin(bn_x, g_session_public_x.data);
+    BN_bn2bin(bn_y, g_session_public_y.data);
     BN_CTX_end(bn_ctx);
  
-
+    byte session_public_keys[1 + 32 + 32];
     byte pre_master_secret[32];
     byte seed0_prefix[13] = "master secret";
     byte seed1_prefix[13] = "key expansion";
@@ -765,7 +765,10 @@ void make_keys() {
     dword secret_len = ECDH_compute_key(pre_master_secret, 32, peer_pub_key, key, NULL);
     if (secret_len != 32) throw_error("secret length wasn't 32");
     
-    g_session_public_keys[0] = 0x04;
+    session_public_keys[0] = 0x04;
+    memcpy(session_public_keys + 1, g_session_public_x.data, 32);
+    memcpy(session_public_keys + 1 + 32, g_session_public_y.data, 32);
+
     memcpy(seed + 13, g_client_random, 32);
     memcpy(seed + 13 + 32, g_srv_random, 32);
 
@@ -888,7 +891,7 @@ void open_tls() {
 
 
 
-    build_client_handshake(ctx, &handshake_buf, &handshake_buf_len, g_tls_cert, g_tls_cert_len, g_session_public_keys, 65, g_master_secret);
+    build_client_handshake(ctx, &handshake_buf, &handshake_buf_len, g_tls_cert, g_tls_cert_len, g_session_public_x, g_session_public_y, g_master_secret);
 
     usb_cmd(handshake_buf, handshake_buf_len, rsp, 1024 * 1024, &rsp_len);
 
