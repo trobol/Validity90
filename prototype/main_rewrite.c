@@ -192,31 +192,12 @@ void loadBiosData() {
     set_hwkey(name, serial);
 }
 
-// key and out are 32 bytes
-void hmac_sha256_compute(byte* key, byte* data, int data_len, byte* out) {
-    HMAC(EVP_sha256(), key, 32, data, data_len, out, NULL);
-}
 
 byte psk_encryption_key[32];
 byte psk_validation_key[32];
 
 
 
-// secret is 32 bytes? out must be out_len bytes long
-void prf(byte* secret, byte* seed, int seed_len, byte* out, int len) {
-
-    
-    byte* a_len = 32 + seed_len; 
-    byte* a = (byte*)malloc(a_len); 
-    memcpy(a + 32, seed, seed_len); 
-
-    hmac_sha256_compute(secret, seed, seed_len, a);
-    
-    for (byte* res = out; res < out+len; res += 32) {
-        hmac_sha256_compute(secret, a, a_len, res); // seed is a + seed
-        hmac_sha256_compute(secret, a, 32, a); // seed is a, replace a in "a + seed" buffer
-    }
-}
 
 void set_hwkey(char* name, char* serial) {
     // null terminators are included
@@ -235,8 +216,8 @@ void set_hwkey(char* name, char* serial) {
     seed[1] = 'W';
     seed[2] = 'K';
 
-    prf(password_hardcoded, seed, seed_len, psk_encryption_key, 32);
-    prf(psk_encryption_key, gwk_sign_hardcoded, sizeof(gwk_sign_hardcoded), psk_validation_key, 32);
+    prf(password_hardcoded, 32, seed, seed_len, psk_encryption_key, 32);
+    prf(psk_encryption_key, 32, gwk_sign_hardcoded, sizeof(gwk_sign_hardcoded), psk_validation_key, 32);
     
     print_hex(psk_encryption_key, 32);
     print_hex(psk_validation_key, 32);
@@ -540,7 +521,7 @@ void parse_tls_priv(byte* body, int len) {
     if ( info->prefix != 2 ) throw_error("unknown private key prefix");
 
     byte sig[32];
-    hmac_sha256_compute(psk_validation_key, info->data, 128, sig);
+    hmac_sha256_compute(psk_validation_key, 32, info->data, 128, sig);
 
     if ( memcmp(info->hash, sig, 32) != 0 )
         throw_error("signature verification failed. this device was probably paired with another computer");
@@ -750,6 +731,7 @@ void parse_tls_flash() {
 }
 
 static byte g_session_public_keys[1 + 32 + 32];
+static byte g_master_secret[48];
 
 void make_keys() {
 
@@ -760,20 +742,20 @@ void make_keys() {
     if ( EC_KEY_generate_key(key) != 1) throw_error("unable to generate key");
 
     BN_CTX* bn_ctx = BN_CTX_new();
-    BIGNUM* bn_x = BN_new();
-    BIGNUM* bn_y = BN_new();
+    BN_CTX_start(bn_ctx);
+    BIGNUM* bn_x = BN_CTX_get(bn_ctx);
+    BIGNUM* bn_y = BN_CTX_get(bn_ctx);
     EC_POINT* point = EC_KEY_get0_public_key(key);
 
-    if ( EC_POINT_get_affine_coordinates_GFp(group, point, bn_x, bn_y, bn_ctx) )
+    if ( EC_POINT_get_affine_coordinates_GFp(group, point, bn_x, bn_y, bn_ctx) != 1)
         throw_error("failed to get coords");
 
     BN_bn2bin(bn_x, g_session_public_keys + 1);
     BN_bn2bin(bn_y, g_session_public_keys + 1 + 32);
-
+    BN_CTX_end(bn_ctx);
  
 
     byte pre_master_secret[32];
-    byte master_secret[0x30];
     byte seed0_prefix[13] = "master secret";
     byte seed1_prefix[13] = "key expansion";
     byte seed[32 + 32 + 13];
@@ -787,19 +769,15 @@ void make_keys() {
     memcpy(seed + 13 + 32, g_srv_random, 32);
 
     memcpy(seed, "master secret", 13);
-    prf(pre_master_secret, seed, 64 + 13, master_secret, sizeof(master_secret));
+    prf(pre_master_secret, 32, seed, 64 + 13, g_master_secret, sizeof(g_master_secret));
 
     memcpy(seed, "key expansion", 13);
-    prf(master_secret, seed, 64 + 13, &g_key_block, sizeof(g_key_block));
+    prf(g_master_secret, 48, seed, 64 + 13, &g_key_block, sizeof(g_key_block));
 
     
-    BN_free(bn_x);
-    BN_free(bn_y);
-    EC_POINT_free(point);
+    EC_KEY_free(key);
     EC_POINT_free(peer_pub_key);
     BN_CTX_free(bn_ctx);
-    EC_GROUP_free(group);
-    EC_KEY_free(key);
 }
 
 byte* make_handshake(byte* data, word data_len) {
@@ -865,9 +843,12 @@ void update_handshake_hash(SHA256_CTX* ctx, byte* buf) {
     
     Handshake* handshake = msg->fragment;
 
-    while(handshake < msg->fragment + msg->length) {
-        uint32_t length = (((uint32_t)handshake->length[0] << 16) | ((uint32_t)handshake->length[1] << 8) | handshake->length[2]) + 4;
-        if ( SHA256_Update(ctx, handshake->body, length) != 1) throw_error("failed to update hash");
+    uint16_t msg_len = (msg->length >> 8) | (msg->length << 8);
+    uint8_t *end = msg->fragment + msg_len;
+    
+    while(handshake < end) {
+        uint32_t length = (handshake->length[2] | ((uint32_t)handshake->length[1] << 8) | ((uint32_t)handshake->length[0] << 16)) + 4;
+        if ( SHA256_Update(ctx, handshake, length) != 1) throw_error("failed to update hash");
         handshake = ((uint8_t*)handshake) + length;
     }
 }
@@ -886,7 +867,9 @@ void open_tls() {
     urandom(g_client_random, 32);
     build_client_hello(hello_msg, g_client_random);
 
+    print_hex(hello_msg, TLS_CLIENT_HELLO_SIZE);
     update_handshake_hash(ctx, hello_msg + 4);
+    
 
     int rsp_len;
     byte rsp[1024 * 1024];
@@ -904,9 +887,11 @@ void open_tls() {
 
 
 
-    build_client_handshake(ctx, &handshake_buf, &handshake_buf_len, g_tls_cert, g_tls_cert_len, g_session_public_keys, 65);
+    build_client_handshake(ctx, &handshake_buf, &handshake_buf_len, g_tls_cert, g_tls_cert_len, g_session_public_keys, 65, g_master_secret);
 
     usb_cmd(handshake_buf, handshake_buf_len, rsp, 1024 * 1024, &rsp_len);
+
+    parse_tls_response(rsp, rsp_len);
 
     /*
     puts("0000");
