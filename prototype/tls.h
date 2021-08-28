@@ -265,11 +265,12 @@ void build_client_hello(uint8_t* out, uint8_t* client_random) {
 }
 
 
-void build_client_handshake(SHA256_CTX* ctx, byte** out, uint32_t* out_len, uint8_t* cert, uint8_t cert_len, TLS_PUBKEY pub_x, TLS_PUBKEY pub_y, uint8_t* master_secret) {
+void build_client_handshake(SHA256_CTX* ctx, byte** out, uint32_t* out_len, uint8_t* cert, uint8_t cert_len, TLS_PUBKEY pub_x, TLS_PUBKEY pub_y, EC_KEY* priv_key , uint8_t* master_secret) {
 
     uint32_t total_cert_len = cert_len;
+    int ecda_size = ECDSA_size(priv_key);
 
-    const int first_msg_len = (sizeof(Handshake) * 3) + sizeof(ClientCertificate) + total_cert_len + sizeof(ClientKeyExchange) + sizeof(CertificateVerify) + SHA256_DIGEST_LENGTH; 
+    const int first_msg_len = (sizeof(Handshake) * 3) + sizeof(ClientCertificate) + total_cert_len + sizeof(ClientKeyExchange) + sizeof(CertificateVerify) + SHA256_DIGEST_LENGTH + ecda_size; 
     const int buf_len = 4 +
                         sizeof(TLSPlaintext) + first_msg_len +
                         sizeof(TLSPlaintext) + sizeof(ChangeCipherSpec) +
@@ -309,10 +310,11 @@ void build_client_handshake(SHA256_CTX* ctx, byte** out, uint32_t* out_len, uint
 
     Handshake* hnd_cert_verify = hnd_key_exchange->body + msg_key_exchange_len;
     CertificateVerify* msg_cert_verify = hnd_cert_verify->body;
-    int msg_cert_verify_len = sizeof(CertificateVerify) + SHA256_DIGEST_LENGTH;
+    int msg_cert_verify_len = sizeof(CertificateVerify) + ecda_size;
     Handshake_init(hnd_cert_verify, TLS_HANDSHAKE_TYPE_CERT_VERIFY, msg_cert_verify_len);
     msg_cert_verify->algorithm = (SignatureAndHashAlgorithm){ 48, 70 };
-    memcpy(msg_cert_verify->handshake_messages, cert_verify, SHA256_DIGEST_LENGTH);
+    int sig_len;
+    if ( ECDSA_sign(0, cert_verify, SHA256_DIGEST_LENGTH, msg_cert_verify->handshake_messages, &sig_len, priv_key) != 1 ) { puts("failed to sign"); exit(1); }
 
     *out = buf;
     *out_len = buf_len;
