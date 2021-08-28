@@ -200,7 +200,6 @@ void hmac_sha256_compute(uint8_t* key, int key_len, uint8_t* data, int data_len,
 // out must be out_len bytes long
 void prf(uint8_t* secret, int secret_len, uint8_t* seed, int seed_len, uint8_t* out, int len) {
 
-    
     uint32_t a_len = 32 + seed_len; 
     uint8_t* a = (uint8_t*)malloc(a_len); 
     memcpy(a + 32, seed, seed_len); 
@@ -264,18 +263,23 @@ void build_client_hello(uint8_t* out, uint8_t* client_random) {
     
 }
 
+void urandom(byte* out, int len) {
+    if (RAND_load_file("/dev/random", 32) != 32) throw_error("RAND_load_file failed");
+    if (RAND_bytes(out, len) != 1) throw_error("RAND_bytes failed");
+}
 
-void build_client_handshake(SHA256_CTX* ctx, byte** out, uint32_t* out_len, uint8_t* cert, uint8_t cert_len, TLS_PUBKEY pub_x, TLS_PUBKEY pub_y, EC_KEY* priv_key , uint8_t* master_secret) {
+
+void build_client_handshake(SHA256_CTX* ctx, byte** out, uint32_t* out_len, uint8_t* cert, uint8_t cert_len, TLS_PUBKEY pub_x, TLS_PUBKEY pub_y, EC_KEY* priv_key, uint8_t* master_secret, TLS_PUBKEY sign_key) {
 
     uint32_t total_cert_len = cert_len;
     int ecda_size = ECDSA_size(priv_key);
 
-    const int first_msg_len = (sizeof(Handshake) * 3) + sizeof(ClientCertificate) + total_cert_len + sizeof(ClientKeyExchange) + sizeof(CertificateVerify) + SHA256_DIGEST_LENGTH + ecda_size; 
-    const int buf_len = 4 +
+    const int first_msg_len = (sizeof(Handshake) * 3) + sizeof(ClientCertificate) + total_cert_len + sizeof(ClientKeyExchange) + ecda_size;
+    const int max_buf_len = 4 +
                         sizeof(TLSPlaintext) + first_msg_len +
                         sizeof(TLSPlaintext) + sizeof(ChangeCipherSpec) +
-                        sizeof(TLSPlaintext) + sizeof(Handshake) + 80;
-    uint8_t* buf = malloc(buf_len);
+                        sizeof(TLSPlaintext) + 80;
+    uint8_t* buf = malloc(max_buf_len);
 
     add_msg_prefix(buf);
     TLSPlaintext* msg0 = buf + 4;
@@ -309,35 +313,45 @@ void build_client_handshake(SHA256_CTX* ctx, byte** out, uint32_t* out_len, uint
     SHA256_Final(cert_verify, ctx);
 
     Handshake* hnd_cert_verify = hnd_key_exchange->body + msg_key_exchange_len;
-    CertificateVerify* msg_cert_verify = hnd_cert_verify->body;
-    int msg_cert_verify_len = sizeof(CertificateVerify) + ecda_size;
-    Handshake_init(hnd_cert_verify, TLS_HANDSHAKE_TYPE_CERT_VERIFY, msg_cert_verify_len);
-    msg_cert_verify->algorithm = (SignatureAndHashAlgorithm){ 48, 70 };
+    int msg_cert_verify_len = ecda_size;
+   
     int sig_len;
-    if ( ECDSA_sign(0, cert_verify, SHA256_DIGEST_LENGTH, msg_cert_verify->handshake_messages, &sig_len, priv_key) != 1 ) { puts("failed to sign"); exit(1); }
+    if ( ECDSA_sign(0, cert_verify, SHA256_DIGEST_LENGTH, hnd_cert_verify->body, &sig_len, priv_key) != 1 ) { puts("failed to sign"); exit(1); }
+    Handshake_init(hnd_cert_verify, TLS_HANDSHAKE_TYPE_CERT_VERIFY, sig_len);
 
-    *out = buf;
-    *out_len = buf_len;
-
+    printf("sig len: %i total sig: %i\n ", sig_len, ecda_size);
     
-    TLSPlaintext* msg1 = hnd_cert_verify->body + msg_cert_verify_len;
+    
+    TLSPlaintext* msg1 = hnd_cert_verify->body + sig_len;
     TLSPlaintext_init(msg1, TLS_PLAINTEXT_TYPE_CHANGE_CIPHER, sizeof(ChangeCipherSpec));
     ChangeCipherSpec* cng_cipher = msg1->fragment;
     cng_cipher->type = 0x01;
 
    
     uint8_t verify_seed[15 + SHA256_DIGEST_LENGTH];
-    uint8_t verify_data[80];
+    uint8_t verify_data[32];
 
     memcpy(verify_seed, "client finished", 15);
     memcpy(verify_seed + 15, cert_verify, SHA256_DIGEST_LENGTH);
-    prf(master_secret, 48, verify_seed, 15 + SHA256_DIGEST_LENGTH, verify_data, 80);
+    prf(master_secret, 48, verify_seed, 15 + SHA256_DIGEST_LENGTH, verify_data, 12);
 
+
+    uint8_t final_data_buf[sizeof(TLSPlaintext) + sizeof(Handshake) + 12 + 32];
+    
+
+    TLSPlaintext* buf_msg2 = final_data_buf;
+    Handshake* buf_hnd_final = msg2->fragment;
+    TLSPlaintext_init(buf_msg2, TLS_PLAINTEXT_TYPE_HANDSHAKE, 12);
+    memcpy(verify_data, buf_hnd_final->body, 12);
+
+    
+    hmac_sha256_compute(sign_key.data, 32, buf_msg2, sizeof(TLSPlaintext) + sizeof(Handshake) + 12, hnd_final->body + 12);
 
     TLSPlaintext* msg2 = msg1->fragment + 1;
-    TLSPlaintext_init(msg2, TLS_PLAINTEXT_TYPE_HANDSHAKE, sizeof(Handshake) + 80);
-    Handshake* hnd_final = msg2->fragment;
-    Handshake_init(hnd_final, TLS_HANDSHAKE_TYPE_FINISHED, 80);
-    memcpy(verify_data, hnd_final->body, 80);
+    TLSPlaintext_init(msg2, TLS_PLAINTEXT_TYPE_HANDSHAKE, 80);
+    
 
+
+    *out = buf;
+    *out_len = max_buf_len;
 }
