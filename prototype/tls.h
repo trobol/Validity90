@@ -39,7 +39,7 @@ typedef struct {
 #define TLS_HANDSHAKE_TYPE_CERT_REQ 13
 #define TLS_HANDSHAKE_TYPE_SERVER_HELLO_DONE 14
 #define TLS_HANDSHAKE_TYPE_CERT_VERIFY 15
-#define TLS_HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE 16
+#define TLS_HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE 0x10
 #define TLS_HANDSHAKE_TYPE_FINISHED 20
 
 
@@ -110,12 +110,6 @@ typedef struct {
     // shouldn't be any more data, extensions not supported
 } __attribute__((packed)) ServerHello;
 
-
-typedef struct {
-    uint8_t certificates_length;
-    uint8_t certificates[];
-} __attribute__((packed)) Certificate;
-
 // not in spec
 typedef struct {
     uint8_t len0[3];
@@ -124,10 +118,6 @@ typedef struct {
     uint8_t cert_data[];
 } __attribute__((packed)) ClientCertificate;
 
-typedef struct {
-    uint16_t length;
-    uint8_t dh_public[];
-} __attribute__((packed)) ClientKeyExchange;
 
 
 #define TLS_HASH_ALGORITHM_NONE 0
@@ -270,9 +260,9 @@ void build_client_hello(uint8_t* out, uint8_t* client_random) {
 
 void build_client_handshake(SHA256_CTX* ctx, byte** out, uint32_t* out_len, uint8_t* cert, uint8_t cert_len, uint8_t* client_params, uint8_t client_params_len, uint8_t* master_secret) {
 
-    uint32_t total_cert_len = cert_len + 2;
+    uint32_t total_cert_len = cert_len;
 
-    const int first_msg_len = (sizeof(Handshake) * 3) + sizeof(Certificate) + sizeof(ClientCertificate) + total_cert_len + sizeof(ClientKeyExchange) + client_params_len + sizeof(CertificateVerify) + SHA256_DIGEST_LENGTH; 
+    const int first_msg_len = (sizeof(Handshake) * 3) + sizeof(ClientCertificate) + total_cert_len + client_params_len + sizeof(CertificateVerify) + SHA256_DIGEST_LENGTH; 
     const int buf_len = 4 +
                         sizeof(TLSPlaintext) + first_msg_len +
                         sizeof(TLSPlaintext) + sizeof(ChangeCipherSpec) +
@@ -284,42 +274,42 @@ void build_client_handshake(SHA256_CTX* ctx, byte** out, uint32_t* out_len, uint
     TLSPlaintext_init(msg0, TLS_PLAINTEXT_TYPE_HANDSHAKE, first_msg_len);
 
     Handshake* hnd_cert = msg0->fragment;
-    Certificate* msg_cert = hnd_cert->body;
-    ClientCertificate* msg_client_cert = msg_cert->certificates;
-    int msg_cert_len = sizeof(Certificate) + sizeof(ClientCertificate) + total_cert_len;
+    ClientCertificate* msg_client_cert = hnd_cert->body;
+    int msg_cert_len = sizeof(ClientCertificate) + total_cert_len;
     Handshake_init(hnd_cert, TLS_HANDSHAKE_TYPE_CERT, msg_cert_len);
-    msg_cert->certificates_length = cert_len;
     msg_client_cert->len0[0] = msg_client_cert->len1[0] = total_cert_len >> 16;
     msg_client_cert->len0[1] = msg_client_cert->len1[1] = total_cert_len >> 8;
     msg_client_cert->len0[2] = msg_client_cert->len1[2] = total_cert_len;
-    msg_client_cert->client_random[0] = 10;
-    msg_client_cert->client_random[1] = 0x13; // TODO: randomize this
+    msg_client_cert->client_random[0] = 0xac;
+    msg_client_cert->client_random[1] = 0x16; // TODO: randomize this
     memcpy(msg_client_cert->cert_data, cert, cert_len);
 
 
 
     Handshake* hnd_key_exchange = hnd_cert->body + msg_cert_len;
-    ClientKeyExchange* msg_key_exchange = hnd_key_exchange->body;
-    int msg_key_exchange_len = sizeof(ClientKeyExchange) + client_params_len;
+    int msg_key_exchange_len = client_params_len;
     Handshake_init(hnd_key_exchange, TLS_HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE, msg_key_exchange_len);
-    msg_key_exchange->length = (client_params_len >> 8) | (client_params_len << 8);
-    memcpy(msg_key_exchange->dh_public, client_params, client_params_len);
+    memcpy(hnd_key_exchange->body, client_params, client_params_len);
 
+    puts("handshake");
+    print_hex(client_params, client_params_len);
     
     uint8_t cert_verify[SHA256_DIGEST_LENGTH];
 
-    SHA256_Update(ctx, msg0, (hnd_key_exchange->body + msg_key_exchange_len) - (uint8_t*)msg0);
+    SHA256_Update(ctx, hnd_cert, msg_cert_len + sizeof(Handshake));
+    SHA256_Update(ctx, hnd_key_exchange, msg_key_exchange_len + sizeof(Handshake));
     SHA256_Final(cert_verify, ctx);
 
     Handshake* hnd_cert_verify = hnd_key_exchange->body + msg_key_exchange_len;
     CertificateVerify* msg_cert_verify = hnd_cert_verify;
-    int msg_cert_verify_len = sizeof(CertificateVerify) + SHA256_DIGEST_LENGTH + 2;
+    int msg_cert_verify_len = sizeof(CertificateVerify) + SHA256_DIGEST_LENGTH;
     Handshake_init(hnd_cert_verify, TLS_HANDSHAKE_TYPE_CERT_VERIFY, msg_cert_verify_len);
     msg_cert_verify->algorithm = (SignatureAndHashAlgorithm){ 48, 70 };
     memcpy(msg_cert_verify->handshake_messages, cert_verify, SHA256_DIGEST_LENGTH);
 
     *out = buf;
     *out_len = buf_len;
+    //*out_len = 4 + sizeof(TLSPlaintext) + first_msg_len;
 
     
     TLSPlaintext* msg1 = hnd_cert_verify->body + msg_cert_verify_len;
