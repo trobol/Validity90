@@ -30,8 +30,7 @@
 #define xstr(a) str(a)
 #define str(a) #a
 
-#define max(a,b) (a > b ? a : b)
-#define min(a,b) (a > b ? b : a)
+
 
 #define err(x) res_err(x, xstr(x))
 #define errb(x) res_errb(x, xstr(x))
@@ -209,15 +208,8 @@ void set_hwkey(char* name, char* serial) {
     memcpy(hwkey, name, name_len);
     memcpy(hwkey + name_len, serial, serial_len);
 
-    int seed_len = 3 + hwkey_len;
-    byte* seed = (byte*)malloc(seed_len);
-    memcpy(seed + 3, hwkey, hwkey_len);
-    seed[0] = 'G';
-    seed[1] = 'W';
-    seed[2] = 'K';
-
-    prf(password_hardcoded, 32, seed, seed_len, psk_encryption_key, 32);
-    prf(psk_encryption_key, 32, gwk_sign_hardcoded, sizeof(gwk_sign_hardcoded), psk_validation_key, 32);
+    prf(password_hardcoded, 32, "GWK", hwkey, hwkey_len, psk_encryption_key, 32);
+    prf(psk_encryption_key, 32, "GWK_SIGN", gwk_sign_hardcoded, 32, psk_validation_key, 32);
     
     print_hex(psk_encryption_key, 32);
     print_hex(psk_validation_key, 32);
@@ -474,12 +466,12 @@ static EC_KEY* g_ecdh_q;
 
 
 static struct {
-    byte sign_key[32];
-    byte validation_key[32];
-    byte encryption_key[32];
-    byte decryption_key[32];
+    TLS_KEY32 sign_key;
+    TLS_KEY32 validation_key;
+    TLS_KEY32 encryption_key;
+    TLS_KEY32 decryption_key;
     byte unknown0[160];
-} g_key_block;
+} __attribute__((packed)) g_key_block;
 
 
 BIGNUM* make_bignum(byte* n) {
@@ -521,10 +513,11 @@ void parse_tls_priv(byte* body, int len) {
     struct tls_priv_info* info = body;
     if ( info->prefix != 2 ) throw_error("unknown private key prefix");
 
-    byte sig[32];
-    hmac_sha256_compute(psk_validation_key, 32, info->data, 128, sig);
+    HASH_SHA256 sig = hmac_sha256(psk_validation_key, 32, info->data, 128);
+    print_hex(sig.data, 32);
+    print_hex(info->hash, 32);
 
-    if ( memcmp(info->hash, sig, 32) != 0 )
+    if ( memcmp(info->hash, sig.data, 32) != 0 )
         throw_error("signature verification failed. this device was probably paired with another computer");
     
     EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
@@ -582,9 +575,9 @@ struct tls_ecdh_info {
 union {
     struct {
     byte unknown0[8];
-    byte x[32];
+    TLS_KEY32 x;
     byte unknown1[36];
-    byte y[32];
+    TLS_KEY32 y;
     byte unknown2[36];
     };
     byte key[0x90];
@@ -593,7 +586,8 @@ union {
     byte sig[];
 } __attribute__((packed));
 
-
+static TLS_KEY32 g_pubkey_x;
+static TLS_KEY32 g_pubkey_y;
 
 
 void parse_tls_ecdh(byte* body, int len) {
@@ -603,8 +597,8 @@ void parse_tls_ecdh(byte* body, int len) {
     struct tls_ecdh_info* info = body;
     byte* zeros = info->sig + info->sig_len;
     
-    BIGNUM* x = make_bignum(info->x);
-    BIGNUM* y = make_bignum(info->y);
+    BIGNUM* x = make_bignum(info->x.data);
+    BIGNUM* y = make_bignum(info->y.data);
 
     printf("x: %s\ny: %s\n", BN_bn2hex(x), BN_bn2hex(y));
     
@@ -733,9 +727,15 @@ void parse_tls_flash() {
     }
 }
 
-static TLS_PUBKEY g_session_public_x;
-static TLS_PUBKEY g_session_public_y;
-static byte g_master_secret[48];
+static struct {
+    TLS_KEY32 x;
+    TLS_KEY32 y;
+} __attribute__((packed)) g_session_public;
+static byte g_master_secret[0x30];
+
+void generate_keys() {
+   
+}
 
 void make_keys() {
 
@@ -754,32 +754,32 @@ void make_keys() {
     if ( EC_POINT_get_affine_coordinates_GFp(group, point, bn_x, bn_y, bn_ctx) != 1)
         throw_error("failed to get coords");
 
-    BN_bn2bin(bn_x, g_session_public_x.data);
-    BN_bn2bin(bn_y, g_session_public_y.data);
+    BN_bn2bin(bn_x, g_session_public.x.data);
+    BN_bn2bin(bn_y, g_session_public.y.data);
     BN_CTX_end(bn_ctx);
- 
-    byte session_public_keys[1 + 32 + 32];
-    byte pre_master_secret[32];
-    byte seed0_prefix[13] = "master secret";
-    byte seed1_prefix[13] = "key expansion";
-    byte seed[32 + 32 + 13];
 
+    TLS_KEY32 pre_master_secret;
+    byte session_public_keys[1 + 32 + 32];
+    byte seed[32 + 32];
+
+    
     const EC_POINT* peer_pub_key = EC_KEY_get0_public_key(g_ecdh_q);
-    dword secret_len = ECDH_compute_key(pre_master_secret, 32, peer_pub_key, key, NULL);
+    dword secret_len = ECDH_compute_key(pre_master_secret.data, 32, peer_pub_key, key, NULL);
     if (secret_len != 32) throw_error("secret length wasn't 32");
+   
     
     session_public_keys[0] = 0x04;
-    memcpy(session_public_keys + 1, g_session_public_x.data, 32);
-    memcpy(session_public_keys + 1 + 32, g_session_public_y.data, 32);
+    memcpy(session_public_keys + 1, g_session_public.x.data, 32);
+    memcpy(session_public_keys + 1 + 32, g_session_public.y.data, 32);
 
-    memcpy(seed + 13, g_client_random, 32);
-    memcpy(seed + 13 + 32, g_srv_random, 32);
+    memcpy(seed, g_client_random, 32);
+    memcpy(seed + 32, g_srv_random, 32);
 
-    memcpy(seed, "master secret", 13);
-    prf(pre_master_secret, 32, seed, 64 + 13, g_master_secret, sizeof(g_master_secret));
 
-    memcpy(seed, "key expansion", 13);
-    prf(g_master_secret, 48, seed, 64 + 13, &g_key_block, sizeof(g_key_block));
+    prf(pre_master_secret.data, 32, "master secret", seed, 64, g_master_secret, 0x30);
+
+    prf(g_master_secret, 0x30, "key expansion", seed, 64, &g_key_block, 0x120);
+
 
     
     EC_KEY_free(key);
@@ -829,10 +829,6 @@ struct tls_client_hello {
 
 } __attribute__((packed));
 
-void urandom(byte* out, int len) {
-    if (RAND_load_file("/dev/random", 32) != 32) throw_error("RAND_load_file failed");
-    if (RAND_bytes(out, len) != 1) throw_error("RAND_bytes failed");
-}
 
 /*
 int SHA256_Update(SHA256_CTX *c, const void *data, size_t len);
@@ -844,7 +840,7 @@ void add_prefix(byte* buf) {
     memcpy(buf, prefix, 4);
 }
 
-void update_handshake_hash(SHA256_CTX* ctx, byte* buf) {
+void update_handshake_hash(SHA256_CTX* ctx, SHA256_CTX* ctx_dupe, byte* buf) {
     TLSPlaintext* msg = buf;
     if ( msg->type != TLS_PLAINTEXT_TYPE_HANDSHAKE) throw_error("expected message to be a handshake");
     
@@ -856,6 +852,7 @@ void update_handshake_hash(SHA256_CTX* ctx, byte* buf) {
     while(handshake < end) {
         uint32_t length = (handshake->length[2] | ((uint32_t)handshake->length[1] << 8) | ((uint32_t)handshake->length[0] << 16)) + 4;
         if ( SHA256_Update(ctx, handshake, length) != 1) throw_error("failed to update hash");
+        if ( SHA256_Update(ctx_dupe, handshake, length) != 1) throw_error("failed to update hash");
         handshake = ((uint8_t*)handshake) + length;
     }
 }
@@ -863,7 +860,9 @@ void update_handshake_hash(SHA256_CTX* ctx, byte* buf) {
 
 void open_tls() {
     SHA256_CTX* ctx;
+    SHA256_CTX* ctx_dupe;
     SHA256_Init(ctx);
+    SHA256_Init(ctx_dupe);
     
     g_secure_rx = false;
     g_secure_tx = false;
@@ -875,7 +874,7 @@ void open_tls() {
     build_client_hello(hello_msg, g_client_random);
 
     print_hex(hello_msg, TLS_CLIENT_HELLO_SIZE);
-    update_handshake_hash(ctx, hello_msg + 4);
+    update_handshake_hash(ctx, ctx_dupe, hello_msg + 4);
     
 
     int rsp_len;
@@ -884,7 +883,7 @@ void open_tls() {
     usb_cmd(hello_msg, TLS_CLIENT_HELLO_SIZE, rsp, 1024 * 1024, &rsp_len);
 
     parse_tls_response(rsp, rsp_len);
-    update_handshake_hash(ctx, rsp);
+    update_handshake_hash(ctx, ctx_dupe, rsp);
 
     make_keys();
 
@@ -894,7 +893,7 @@ void open_tls() {
 
 
 
-    build_client_handshake(ctx, &handshake_buf, &handshake_buf_len, g_tls_cert, g_tls_cert_len, g_session_public_x, g_session_public_y, g_priv_key, g_master_secret);
+    build_client_handshake(ctx, ctx_dupe, &handshake_buf, &handshake_buf_len, g_tls_cert, g_tls_cert_len, g_session_public.x, g_session_public.y, g_priv_key, g_master_secret, g_key_block.sign_key, g_key_block.encryption_key);
 
     usb_cmd(handshake_buf, handshake_buf_len, rsp, 1024 * 1024, &rsp_len);
 
@@ -1114,6 +1113,11 @@ void open_usb_device() {
 }
 
 int main(int argc, char *argv[]) {
+
+    HASH_SHA256 hash = hmac_sha256("key", 3, "The quick brown fox jumps over the lazy dog", 43);
+    print_hex(hash.data, 32);
+
+
     puts("Prototype version 15");
         loadBiosData();
 
@@ -1137,11 +1141,6 @@ int main(int argc, char *argv[]) {
 
 
     init_flash();
-    
-    const byte str[] = { 0x44, 0x00, 0x00, 0x00, 0x16, 0x03, 0x03, 0x01, 0x54, 0x0b, 0x00, 0x00, 0xc0, 0x00, 0x00, 0xb8, 0x00, 0x00, 0xb8, 0xac, 0x16, 0x17, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x79, 0x05, 0xad, 0xd3, 0xdd, 0x1e, 0x90, 0xa7, 0x6e, 0x3e, 0x7e, 0xc6, 0x17, 0x7d, 0x2f, 0xff, 0x12, 0xa4, 0x02, 0xf5, 0x6c, 0x24, 0xe9, 0x67, 0xd9, 0x29, 0xae, 0x4a, 0x28, 0x4c, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x22, 0x0b, 0x1e, 0x96, 0x72, 0xd8, 0x16, 0xd2, 0xc8, 0xf9, 0xdd, 0x48, 0xeb, 0xaf, 0x12, 0x86, 0x5c, 0x78, 0x67, 0x9f, 0x67, 0x28, 0xe9, 0xe1, 0x19, 0x78, 0xd7, 0x4d, 0xda, 0xa6, 0xc8, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0xf0, 0x72, 0x86, 0x0a, 0xd2, 0x64, 0xce, 0xac, 0xba, 0x2a, 0xf6, 0x02, 0xf8, 0x37, 0x1a, 0xec, 0xa2, 0x9d, 0x5c, 0x41, 0x3c, 0x7f, 0xa9, 0xd4, 0x85, 0x83, 0xd3, 0xed, 0xbf, 0xbc, 0xfc, 0x10, 0x00, 0x00, 0x41, 0x04, 0x5f, 0x78, 0xaf, 0x05, 0xac, 0xc7, 0x98, 0x0f, 0x9f, 0xb4, 0xb1, 0xee, 0xbb, 0x32, 0xc5, 0x47, 0x88, 0x56, 0x31, 0x35, 0xa6, 0xf5, 0x74, 0x0a, 0xc7, 0xde, 0x2e, 0xbe, 0x39, 0x2e, 0xe1, 0x64, 0x08, 0x34, 0xa9, 0x81, 0x46, 0xb5, 0x99, 0xe4, 0xda, 0x70, 0xb4, 0x45, 0xf2, 0x78, 0xed, 0x84, 0x91, 0xcb, 0x7e, 0x4e, 0xab, 0xd6, 0x5a, 0xe7, 0x43, 0x9c, 0xd9, 0xbc, 0xcb, 0x61, 0x60, 0xf6, 0x0f, 0x00, 0x00, 0x47, 0x30, 0x45, 0x02, 0x21, 0x00, 0xdc, 0x66, 0x19, 0x0a, 0x6d, 0x92, 0x1e, 0xee, 0x6e, 0xed, 0x29, 0x67, 0x7a, 0x2d, 0xc0, 0xe2, 0xed, 0xde, 0xfc, 0xbc, 0x37, 0x2d, 0x6c, 0x08, 0xf1, 0x89, 0xdd, 0xc2, 0xd0, 0x7f, 0xcd, 0x7b, 0x02, 0x20, 0x20, 0x0f, 0xb1, 0x79, 0x73, 0x96, 0x8d, 0x10, 0x1e, 0x62, 0x91, 0xa4, 0x6b, 0x20, 0x98, 0xfd, 0x7e, 0x12, 0x80, 0x6b, 0xf5, 0xc7, 0x7e, 0xd1, 0xa6, 0x46, 0x75, 0x46, 0x52, 0x0b, 0x09, 0x0e, 0x14, 0x03, 0x03, 0x00, 0x01, 0x01, 0x16, 0x03, 0x03, 0x00, 0x50, 0xcf, 0xfe, 0x12, 0x40, 0x3d, 0xb5, 0x9f, 0x60, 0x7b, 0xd0, 0x09, 0x74, 0x6d, 0xaf, 0xf2, 0xbf, 0x64, 0xd8, 0x11, 0x96, 0xf4, 0x81, 0xb0, 0x42, 0x8e, 0xee, 0x16, 0x98, 0xf3, 0x36, 0xec, 0xa2, 0xac, 0xa8, 0xbd, 0x75, 0xb4, 0x0c, 0x94, 0x56, 0xf1, 0xb8, 0xd2, 0x39, 0x5c, 0x72, 0x0a, 0x26, 0xd9, 0xa0, 0x00, 0xd6, 0xa7, 0xd8, 0x0a, 0x9a, 0x7e, 0x61, 0x27, 0xf4, 0x7c, 0x21, 0xdc, 0x81, 0xb0, 0x17, 0x9e, 0xb5, 0x74, 0x89, 0xf4, 0xde, 0x0b, 0xd9, 0xeb, 0x4e, 0xae, 0x4e, 0x4a, 0x2a };
-    puts("str");
-    print_hex(str, sizeof(str));
-
     
 
     OpenSSL_add_all_algorithms();
