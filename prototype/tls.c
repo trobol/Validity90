@@ -109,19 +109,17 @@ void prf(uint8_t* secret, int secret_len, const char* label, uint8_t* seed, int 
                             HMAC_hash(secret, A(3) + seed) + ...
     */
     int label_len = strlen(label);
-    int full_seed_len = label_len + seed_len;
-    uint8_t* full_seed = malloc(full_seed_len);
-    int a_len = 32 + full_seed_len; 
+    int a_len = 32 + label_len + seed_len; 
     uint8_t *a = (uint8_t*)malloc(a_len);
     uint8_t *hash_buf = (uint8_t*)malloc(64 + a_len);
     uint8_t out_buf[32];
 
-    // prepend label to seed
-    memcpy(full_seed, label, label_len);
-    memcpy(full_seed + label_len, seed, seed_len);
 
-    hmac_sha256_raw(secret, secret_len, full_seed, full_seed_len, hash_buf, a);
-    memcpy(a + 32, full_seed, full_seed_len);
+    memcpy(a + 32, label, label_len);
+    memcpy(a + 32 + label_len, seed, seed_len);
+
+    hmac_sha256_raw(secret, secret_len, a + 32, label_len + seed_len, hash_buf, a);
+    
     
     
     for (uint32_t i = 0; i < len; i += 32) {
@@ -163,7 +161,7 @@ void Handshake_init(Handshake* out, uint8_t msg_type, uint32_t len) {
     out->length[2] = len;
 }
 
-void build_client_hello(uint8_t* out, uint8_t* client_random) {
+void build_client_hello(uint8_t* out, TLS_KEY32 client_random) {
     
    
     TLSPlaintext* msg = out+4;
@@ -194,8 +192,8 @@ void build_client_hello(uint8_t* out, uint8_t* client_random) {
     ec_formats->extension_type = TLS_EXTENSION_TYPE_EC_POINTS_FORMAT;
     ec_formats->data[0] = 0x01;
     ec_formats->data[1] = 0x00;
-    
-    memcpy(hello->random, client_random, 32);
+
+    hello->random = client_random;
     
 }
 

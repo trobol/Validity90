@@ -100,7 +100,7 @@ typedef struct {
 
 typedef struct {
     ProtocolVersion client_version;
-    uint8_t random[32];
+    TLS_KEY32 random;
     SessionID session_id;
 
     // everything after this is normally dynamic
@@ -119,7 +119,7 @@ typedef struct {
 
 typedef struct {
     ProtocolVersion server_version;
-    HASH_SHA256 random;
+    TLS_KEY32 random;
     SessionID session_id;
     uint16_t cipher_suite;
     uint8_t compression_method;
@@ -237,7 +237,7 @@ HASH_SHA256 hmac_sha256(uint8_t* key, int key_len, uint8_t* msg, int msg_len);
 void add_msg_prefix(uint8_t* out);
 void TLSPlaintext_init(TLSPlaintext* msg, uint8_t type, uint16_t length);
 void Handshake_init(Handshake* out, uint8_t msg_type, uint32_t len);
-void build_client_hello(uint8_t* out, uint8_t* client_random);
+void build_client_hello(uint8_t* out, TLS_KEY32 client_random);
 void urandom(uint8_t* out, int len);
 
 void build_client_handshake(SHA256_CTX* ctx, SHA256_CTX* ctx_dupe, uint8_t** out, uint32_t* out_len, uint8_t* cert, uint8_t cert_len, TLS_KEY32 pub_x, TLS_KEY32 pub_y, EC_KEY* priv_key, uint8_t* master_secret, TLS_KEY32 sign_key, TLS_KEY32 encryption_key);
