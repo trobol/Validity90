@@ -105,7 +105,7 @@ typedef struct {
 
     // everything after this is normally dynamic
     uint16_t cipher_suites_len;
-    uint16_t cipher_suites[2]; 
+    uint16_t cipher_suites[3];
     
     uint8_t compression_methods_len; // zero
     uint8_t compression_methods[0]; 

@@ -176,9 +176,10 @@ void build_client_hello(uint8_t* out, uint8_t* client_random) {
 
     hello->client_version = (ProtocolVersion){ 0x03, 0x03 };
     hello->session_id = (SessionID){ 7, {} };
-    hello->cipher_suites_len = 0x0400; // 4 little endian
+    hello->cipher_suites_len = 0x0600; // 4 little endian
     hello->cipher_suites[0] = 0x05c0;
     hello->cipher_suites[1] = 0x3d00;
+    hello->cipher_suites[2] = 0x8d00;
     hello->compression_methods_len = 0;
     hello->extensions_len = 0x0a00;
     
@@ -280,7 +281,7 @@ void build_client_handshake(SHA256_CTX* ctx, SHA256_CTX* ctx_dupe, uint8_t** out
 
     uint8_t verify_data[12];
 
-    prf(master_secret, 64, "client finished", cert_verify, SHA256_DIGEST_LENGTH, verify_data, 12);
+    prf(master_secret, 0x30, "client finished", cert_verify, SHA256_DIGEST_LENGTH, verify_data, 12);
 
 
     uint8_t final_data_buf[64];
@@ -310,12 +311,13 @@ void build_client_handshake(SHA256_CTX* ctx, SHA256_CTX* ctx_dupe, uint8_t** out
     uint8_t rand_vec[16];
     urandom(rand_vec, 16);
     memcpy(msg2->fragment, rand_vec, 16);
+    //reverse(msg2->fragment, 16);
 
     EVP_CIPHER_CTX* ci_ctx = EVP_CIPHER_CTX_new();
-    EVP_EncryptInit_ex(ci_ctx, EVP_aes_256_cbc(), NULL, encryption_key.data, rand_vec);
+    if ( EVP_EncryptInit(ci_ctx, EVP_aes_256_cbc(), encryption_key.data, rand_vec) != 1) {puts("faild to encrpt"); exit(1);}
     int outlenA, outlenB;
-    EVP_EncryptUpdate(ci_ctx, msg2->fragment + 16, &outlenA, buf_msg2, 64);
-    EVP_EncryptFinal(ci_ctx, msg2->fragment + 16 + outlenA, &outlenB);
+    if ( EVP_EncryptUpdate(ci_ctx, msg2->fragment + 16, &outlenA, buf_msg2, 64) != 1) {puts("faild to encrpt"); exit(1);}
+    //EVP_EncryptFinal(ci_ctx, msg2->fragment + 16 + outlenA, &outlenB);
     
     printf("outlenA : %i, outlenB: %i \n", outlenA, outlenB);
     

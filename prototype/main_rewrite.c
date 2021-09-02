@@ -837,6 +837,7 @@ void update_handshake_hash(SHA256_CTX* ctx, SHA256_CTX* ctx_dupe, byte* buf) {
         uint32_t length = (handshake->length[2] | ((uint32_t)handshake->length[1] << 8) | ((uint32_t)handshake->length[0] << 16)) + 4;
         if ( SHA256_Update(ctx, handshake, length) != 1) throw_error("failed to update hash");
         if ( SHA256_Update(ctx_dupe, handshake, length) != 1) throw_error("failed to update hash");
+        printf("hashed blocked %hhu \n", handshake->msg_type);
         handshake = ((uint8_t*)handshake) + length;
     }
 }
