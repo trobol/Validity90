@@ -668,7 +668,7 @@ void parse_tls_flash() {
     byte tls_flash[1024 * 1024];
     int rsp_size;
 
-    read_flash(tls_flash, 1024 * 1024, rsp_size, 1, 0, 0x1000);
+    read_flash(tls_flash, 1024 * 1024, &rsp_size, 1, 0, 0x1000);
 
     byte* end = tls_flash + rsp_size;
     struct tls_flash_info* itr = tls_flash;
@@ -746,7 +746,7 @@ void make_keys(TLS_KEY32 client_random, TLS_KEY32 server_random) {
     if (secret_len != 32) throw_error("secret length wasn't 32");
    
     byte seed[32 + 32];
-    memcpy(seed, client_random, 32);
+    memcpy(seed, client_random.data, 32);
     memcpy(seed + 32, server_random.data, 32);
 
 
@@ -776,7 +776,7 @@ void update_handshake_hash(SHA256_CTX* ctx, SHA256_CTX* ctx_dupe, byte* buf) {
         uint32_t length = (handshake->length[2] | ((uint32_t)handshake->length[1] << 8) | ((uint32_t)handshake->length[0] << 16)) + 4;
         if ( SHA256_Update(ctx, handshake, length) != 1) throw_error("failed to update hash");
         if ( SHA256_Update(ctx_dupe, handshake, length) != 1) throw_error("failed to update hash");
-        printf("hashed blocked %hhu \n", handshake->msg_type);
+        printf("hashed block %hhu \n", handshake->msg_type);
         handshake = ((uint8_t*)handshake) + length;
     }
 }
@@ -787,13 +787,20 @@ void update_handshake_hash(SHA256_CTX* ctx, SHA256_CTX* ctx_dupe, byte* buf) {
 ServerHello get_server_hello(uint8_t* buf, int buf_len) {
     TLSPlaintext* msg = buf;
     if (msg->type != TLS_PLAINTEXT_TYPE_HANDSHAKE) throw_error("expected handshake");
-    uint8_t* end = msg->fragment + msg->length;
+    uint8_t* end = (uint8_t*)msg->fragment + msg->length;
     Handshake* hnd = msg->fragment;
     while(hnd->msg_type != TLS_HANDSHAKE_TYPE_SERVER_HELLO) {
-        hnd = (uint8_t*)hnd->body + ((hnd->length[2] << 16) | (hnd->length[1] << 8) | hnd->length[0]);
+        hnd = (uint8_t*)hnd->body + ((hnd->length[0] << 16) | (hnd->length[1] << 8) | hnd->length[2]);
         if (hnd >= end) throw_error("no server hello found");
     }
-    return *(ServerHello*)hnd->body;
+    ServerHello* hello = (ServerHello*)hnd->body;
+     if ( hello->cipher_suite != 0x05c0 ) 
+       throw_error("server accepted unsupported cipher suite");
+
+    if ( hello->compression_method != 0 )
+        throw_error("server selected to enable compression, which we don't support");
+
+    return *hello;
 }
 
 void open_tls() {
@@ -824,7 +831,6 @@ void open_tls() {
 
     ServerHello srv_hello = get_server_hello(rsp, rsp_len);
     parse_tls_response(rsp, rsp_len);
-    update_handshake_hash(ctx, ctx_dupe, rsp);
 
     make_keys(client_random, srv_hello.random);
 
@@ -890,7 +896,8 @@ void handle_handshake(byte* data, word data_len) {
         case 0x14:
             handle_finish(packet->data, size);
             break;
-        
+        case 0x02:
+            break;
         default:
             printf("unknown handshake packet: %x\n", packet->type);
             throw_error("unable to process packet");
