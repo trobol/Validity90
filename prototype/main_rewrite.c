@@ -245,11 +245,6 @@ void read_flash(byte* rsp, int max_rsp, int* rsp_size, byte partition, dword add
 }
 
 
-void read_tls_flash(byte* rsp, int max_rsp, int* rsp_size) {
-    return read_flash(rsp, max_rsp, rsp_size, 1, 0, 0x1000);
-}
-
-
 typedef struct _firmware_module_info {
     word type;
     word subtype;
@@ -455,10 +450,9 @@ static byte* g_tls_cert;
 static word g_tls_cert_len;
 
 
-static byte g_srv_random[32];
+static HASH_SHA256 g_srv_random;
 
-static word g_srv_sessid_len;
-static byte *g_srv_sessid;
+static SessionID g_srv_sessid;
 
 static byte g_client_random[32];
 
@@ -480,14 +474,11 @@ BIGNUM* make_bignum(byte* n) {
 
 
 // output is "SHA256_DIGEST_LENGTH" bytes
-void hash_sha256(byte *in, int len, byte* out) {
-    SHA256_CTX context;
-    if(!SHA256_Init(&context))
-        throw_error("failed to init sha256 hash context");
-    if(!SHA256_Update(&context, in, len))
-        throw_error("failed to update sha256 hash");
-    if(!SHA256_Final(out, &context))
-        throw_error("failed to output sha256 hash");
+HASH_SHA256 hash_sha256(byte *in, int len) {
+    HASH_SHA256 ret;
+    if(!SHA256(in, len, ret.data))
+        throw_error("failed to hash");
+    return ret;
 }
 
 
@@ -648,10 +639,9 @@ void parse_tls_ecdh(byte* body, int len) {
         exit(1);
     }
     
-    byte key_hash[SHA256_DIGEST_LENGTH];
-    hash_sha256(info->key, 0x90, key_hash);
+    HASH_SHA256 key_hash = hash_sha256(info->key, 0x90);
 
-    int verify = ECDSA_verify(0, key_hash, SHA256_DIGEST_LENGTH, info->sig, info->sig_len, fwpub);
+    int verify = ECDSA_verify(0, key_hash.data, SHA256_DIGEST_LENGTH, info->sig, info->sig_len, fwpub);
     if ( verify == 1 ) puts("verified signature");
     else if (verify == 0) throw_error("invalid signature");
     else throw_error("ERROR while verifying signature");
@@ -669,61 +659,55 @@ void parse_tls_cert(byte* body, int len) {
 
 void parse_tls_empty(byte* body, int len) {
     for (byte* end = body + len; body < end; body++) 
-    if (*body != 0) {
-        puts("EXPECTED EMPTY BLOCK");
-        exit(1);
-    }
+        if (*body != 0) throw_error("EXPECTED EMPTY BLOCK");
 }
 
 
+struct tls_flash_info {
+    uint16_t itr;
+    uint16_t length;
+    HASH_SHA256 hash;
+    uint8_t body[];
+} __attribute__((packed));
+
 void parse_tls_flash() {
     byte tls_flash[1024 * 1024];
-    
     int rsp_size;
-    read_tls_flash(tls_flash, 1024 * 1024, &rsp_size);
-    
-    SHA256_CTX context;
+
+    read_flash(tls_flash, 1024 * 1024, rsp_size, 1, 0, 0x1000);
+
     byte* end = tls_flash + rsp_size;
-    byte* itr = tls_flash;
+    struct tls_flash_info* itr = tls_flash;
     // TODO: error checking on data amount
-    while(itr < end) {
-        byte hashed_body[SHA256_DIGEST_LENGTH];
-        word id = *(word*)itr;
-        word len = *(word*)(itr+2);
-        byte* hash = itr + 4;
-        itr += 4 + SHA256_DIGEST_LENGTH; // hash is 32 bytes
-        byte* body = itr;
-        itr += len;
+    for(;itr < end; itr = itr->body + itr->length) {
+        HASH_SHA256 hashed_body;
+        
+        if (itr->id == 0xffff) break;
 
-        if (id == 0xffff) break;
-
-        hash_sha256(body, len, hashed_body);
-        if (memcmp(hashed_body, hash, SHA256_DIGEST_LENGTH) != 0) {
-            printf("block id %hu\n", id);
+        hashed_body = hash_sha256(itr->body, itr->length);
+        if (memcmp(hashed_body.data, itr->hash.data, SHA256_DIGEST_LENGTH) != 0) {
+            printf("block id %hu\n", itr->id);
             throw_error("tls section hash did not match hash of body");
         }
 
-        switch(id) {
+        switch(itr->id) {
             case 0:
             case 1:
             case 2:
-                parse_tls_empty(body, len);
+                parse_tls_empty(itr->body, itr->length);
                 break;
             case 3:
-                parse_tls_cert(body, len);
+                parse_tls_cert(itr->body, itr->length);
                 break;
             case 4:
-                parse_tls_priv(body, len);
+                parse_tls_priv(itr->body, itr->length);
                 break;
             case 6:
-                parse_tls_ecdh(body, len);
+                parse_tls_ecdh(itr->body, itr->length);
                 break;
             default:
-                printf("unhandled block id %04x\n", id);
+                printf("unhandled block id %04x\n", itr->id);
         }
-
-           
-       
     }
 }
 
@@ -939,8 +923,11 @@ void open_tls() {
 }
 
 
+
 void handle_server_hello(byte* data, int data_len) {
     byte* end = data + data_len;
+
+    ServerHello* hello = data;
 
     byte major = *(data++);
     byte minor = *(data++);
@@ -954,20 +941,18 @@ void handle_server_hello(byte* data, int data_len) {
     byte suite1 = *(data++);
     byte compr  = *(data++);
     
-    if ( suite0 != 0xc0 || suite1 != 0x05 ) 
+    if ( hello->cipher_suite != 0x05c0 ) 
         throw_error("server accepted unsupported cipher suite");
 
-    if ( compr != 0 )
+    if ( hello->compression_method != 0 )
         throw_error("server selected to enable compression, which we don't support");
 
     if ( data < end )
         throw_error("more data than expected");
 
-    g_srv_sessid = (byte*)malloc(local_srv_sessid_len);
-
-    memcpy(g_srv_random, local_srv_random, 32);
-    memcpy(g_srv_sessid, local_srv_sessid, local_srv_sessid_len);
-    g_srv_sessid_len = local_srv_sessid_len;
+        
+    g_srv_random = hello->random;
+    g_srv_sessid = hello->session_id;
 }
 
 void handle_cert_req(byte* data, int data_len) {

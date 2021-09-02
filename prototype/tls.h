@@ -119,8 +119,8 @@ typedef struct {
 
 typedef struct {
     ProtocolVersion server_version;
-    uint8_t random[32];
-    SessionID session_id[32];
+    HASH_SHA256 random;
+    SessionID session_id;
     uint16_t cipher_suite;
     uint8_t compression_method;
     // shouldn't be any more data, extensions not supported
@@ -180,6 +180,8 @@ typedef struct {
     uint16_t certificate_authorities_len;
     uint8_t certificate_authorities[];
 } __attribute__((packed)) CertificateRequest;
+
+
 
 /*
 
