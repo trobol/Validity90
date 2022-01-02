@@ -62,6 +62,9 @@ static libusb_device_handle * dev;
 
 int idProduct = 0;
 
+bool PRINT_IN_HEX = false;
+bool PRINT_OUT_HEX = true;
+
 /*
  * UTILITIES
  */
@@ -116,14 +119,16 @@ void qwrite(byte * data, int len) {
     err(libusb_bulk_transfer(dev, 0x01, data, len, &send, 10000));
 
     printf("usb write (%u bytes):\n", len);
-    print_hex(data, len);
+    if (PRINT_OUT_HEX)
+        print_hex(data, len);
 }
 
 void qread(byte * data, int len, int *out_len) {
     err(libusb_bulk_transfer(dev, 0x81, data, len, out_len, 10000));
 
     printf("usb read (%u bytes):\n", *out_len);
-    print_hex(data, *out_len);
+    if (PRINT_IN_HEX)
+        print_hex(data, *out_len);
 }
 
 
@@ -403,7 +408,7 @@ void init_flash() {
     puts("flash is not initialized. formatting...");
     
 
-    // TODO: init flash
+    // TODO: format flash
 }
 
 typedef struct _rom_info {
@@ -773,7 +778,7 @@ void update_handshake_hash(SHA256_CTX* ctx, SHA256_CTX* ctx_dupe, byte* buf) {
     uint8_t *end = msg->fragment + msg_len;
     
     while(handshake < end) {
-        uint32_t length = (handshake->length[2] | ((uint32_t)handshake->length[1] << 8) | ((uint32_t)handshake->length[0] << 16)) + 4;
+        uint32_t length = (handshake->length[2] | ((uint32_t)handshake->length[1] << 8) | ((uint32_t)handshake->length[0] << 16)) + sizeof(Handshake);
         if ( SHA256_Update(ctx, handshake, length) != 1) throw_error("failed to update hash");
         if ( SHA256_Update(ctx_dupe, handshake, length) != 1) throw_error("failed to update hash");
         printf("hashed block %hhu \n", handshake->msg_type);
@@ -906,14 +911,60 @@ void handle_handshake(byte* data, word data_len) {
     }
 }
 
-void handle_appdata(byte* data, int data_len) {
+void handle_appdata(byte* rsp, int rsp_len) {} 
 
+void parse_tls_alert (TLSPlaintext* packet) {
+    /*
+     enum {
+          close_notify(0),
+          unexpected_message(10),
+          bad_record_mac(20),
+          decryption_failed_RESERVED(21),
+          record_overflow(22),
+          decompression_failure(30),
+          handshake_failure(40),
+          no_certificate_RESERVED(41),
+          bad_certificate(42),
+          unsupported_certificate(43),
+          certificate_revoked(44),
+          certificate_expired(45),
+          certificate_unknown(46),
+          illegal_parameter(47),
+          unknown_ca(48),
+          access_denied(49),
+          decode_error(50),
+          decrypt_error(51),
+          export_restriction_RESERVED(60),
+          protocol_version(70),
+          insufficient_security(71),
+          internal_error(80),
+          user_canceled(90),
+          no_renegotiation(100),
+          unsupported_extension(110),
+          (255)
+      } AlertDescription;
+    */
+    char* descr;
+    switch(packet->fragment[1]) {
+        case 0:
+            descr = "close notify";  break;
+        case 10:
+            descr = "unexpected message"; break;
+        case 20:
+            descr = "bad record mac"; break;
+        case 42:
+            descr = "bad certificate";  break;
+        default:
+            descr = "unknown"; break;
+    }
+    printf("got alert with level %hhu and descr '%s' (%hhu) ", packet->fragment[0], descr, packet->fragment[1]);
+    throw_error("got alert");
 }
 
 void parse_tls_response(byte* rsp, int rsp_len) {
     byte* end = rsp + rsp_len;
     while (rsp < end) {
-        if (end - rsp < 5) throw_error("tsl response ended unexpectedly");
+        if (end - rsp < 5) throw_error("tls response ended unexpectedly");
 
         TLSPlaintext *packet = rsp;
         word size = (packet->length << 8) | (packet->length >> 8);
@@ -932,8 +983,7 @@ void parse_tls_response(byte* rsp, int rsp_len) {
         else if ( packet->type == 0x17) {
             handle_appdata(packet->fragment, size);
         } else if (packet->type == TLS_PLAINTEXT_TYPE_ALERT) {
-            printf("got alert with level %hhu and descr %hhu\n", packet->fragment[0], packet->fragment[1]);
-            throw_error("got alert");
+            parse_tls_alert(packet);
         }
         else {
             printf("unknown message type: %x\n", packet->type);
@@ -980,9 +1030,14 @@ void open_usb_device() {
 
 int main(int argc, char *argv[]) {
 
-    HASH_SHA256 hash = hmac_sha256("key", 3, "The quick brown fox jumps over the lazy dog", 43);
-    print_hex(hash.data, 32);
+    //HASH_SHA256 hash = hmac_sha256("key", 3, "The quick brown fox jumps over the lazy dog", 43);
+    //print_hex(hash.data, 32);
+    byte prf_out[0x30];
+    byte prf_secret[32] = "01234567890123456789012345678901";
+    byte prf_seed[64] = "0123456789012345678901234567890101234567890123456789012345678901";
+    prf(prf_secret, 32, "hello", prf_seed, 64, prf_out, 0x30);
 
+    print_hex(prf_out, 0x30);
 
     puts("Prototype version 15");
         loadBiosData();

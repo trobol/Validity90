@@ -27,6 +27,42 @@ struct _TLS_HNDSHK {
     */
 };
 
+/*
+
+TLS_HANDSHAKE_TYPE_HELLO_REQ = 0,
+ TLS_HANDSHAKE_TYPE_CLIENT_HELLO = 1,
+ TLS_HANDSHAKE_TYPE_SERVER_HELLO = 2,
+ TLS_HANDSHAKE_TYPE_CERT = 11,
+ TLS_HANDSHAKE_TYPE_SERVER_KEY_EXCHANGE = 12,
+ TLS_HANDSHAKE_TYPE_CERT_REQ = 13,
+ TLS_HANDSHAKE_TYPE_SERVER_HELLO_DONE = 14,
+ TLS_HANDSHAKE_TYPE_CERT_VERIFY = 15,
+ TLS_HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE = 16,
+ TLS_HANDSHAKE_TYPE_FINISHED = 20
+
+ */
+
+const char* tls_handshake_type_name(uint8_t type) {
+    switch(type) {
+        case TLS_HANDSHAKE_TYPE_HELLO_REQ:
+            return "HELLO REQ";
+        case TLS_HANDSHAKE_TYPE_CLIENT_HELLO:
+            return "CLIENT HELLO";
+        case TLS_HANDSHAKE_TYPE_SERVER_HELLO:
+            return "SERVER HELLO";
+        case TLS_HANDSHAKE_TYPE_CERT:
+            return "CERT";
+        case TLS_HANDSHAKE_TYPE_SERVER_KEY_EXCHANGE:
+            return "SERVER KEY EXCHANGE";
+        case TLS_HANDSHAKE_TYPE_CERT_REQ:
+            return "CERT REQ";
+        case TLS_HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE:
+            return "CLIENT KEY EXCHANGE";
+
+        default:
+        return "unknown";
+    }
+}
 
 
 void TLS_MSG_init(TLS_MSG** msg) {
@@ -64,7 +100,7 @@ uint16_t TLS_HNDSHK_get_length(TLS_HNDSHK* hndshk) {
 
 }
 
-// inner_contents must be at least 64 + msg_len bytes long, out must be at least 32 bytes long
+// inner_contents must be at least 64 + msg_len bytes long, out must be at 32 bytes long
 void hmac_sha256_raw(uint8_t* key, int key_len, uint8_t* msg, int msg_len, uint8_t* inner_contents, uint8_t* out) {
     uint8_t padded_key[64] = {};
     uint8_t outer_contents[96] = {};
@@ -114,13 +150,17 @@ void prf(uint8_t* secret, int secret_len, const char* label, uint8_t* seed, int 
     uint8_t *hash_buf = (uint8_t*)malloc(64 + a_len);
     uint8_t out_buf[32];
 
+   
 
     memcpy(a + 32, label, label_len);
     memcpy(a + 32 + label_len, seed, seed_len);
 
+    //a[a_len-1] = 0;
+    //puts(a + 32);
+
     hmac_sha256_raw(secret, secret_len, a + 32, label_len + seed_len, hash_buf, a);
-    
-    
+    puts("hashed secret");
+    print_hex(a, 32);
     
     for (uint32_t i = 0; i < len; i += 32) {
         
@@ -230,13 +270,13 @@ void build_client_handshake(SHA256_CTX* ctx, SHA256_CTX* ctx_dupe, uint8_t** out
     msg_client_cert->client_random[1] = 0x16; // TODO: randomize this
     memcpy(msg_client_cert->cert_data, cert, cert_len);
 
-
+    printf("client cert len: %u\n", total_cert_len);
 
     Handshake* hnd_key_exchange = hnd_cert->body + msg_cert_len;
     ClientKeyExchange* msg_key_exchange = hnd_key_exchange->body;
     int msg_key_exchange_len = sizeof(ClientKeyExchange);
     Handshake_init(hnd_key_exchange, TLS_HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE, msg_key_exchange_len);
-    msg_key_exchange->unknown0 = 0x04;
+    msg_key_exchange->prefix = 0x04;
     //reverse(pub_x.data, 32);
     //reverse(pub_y.data, 32);
     msg_key_exchange->x = pub_x;

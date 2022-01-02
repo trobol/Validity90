@@ -3,8 +3,9 @@
 
     
     some things might not line up with the spec because validity devices don't always
-    NON SPEC COMPLICENCE SHOULD BE MARKED
+    NON SPEC COMPLIANCE SHOULD BE MARKED
 
+    
 
     some of this probably could be done through openssl but because of the spec non compliance and how sparse openssl documentation this is easier for the time being
 
@@ -27,13 +28,16 @@ typedef struct {
 #define TLS_PLAINTEXT_TYPE_HANDSHAKE 0x16
 #define TLS_PLAINTEXT_TYPE_APP_DATA 23
 
-typedef struct {
+typedef struct _TLS_KEY32 {
     uint8_t data[32];
 } __attribute__((packed)) TLS_KEY32;
 
 typedef struct _TLS_MSG TLS_MSG;
 typedef struct _TLS_HNDSHK TLS_HNDSHK;
 
+typedef struct _TLS_CTX {
+
+} _TLS_CTX;
 
 typedef struct {
     uint8_t major;
@@ -47,17 +51,23 @@ typedef struct {
     uint8_t fragment[]; 
 } __attribute__((packed)) TLSPlaintext;
 
-#define TLS_HANDSHAKE_TYPE_HELLO_REQ 0
-#define TLS_HANDSHAKE_TYPE_CLIENT_HELLO 1
-#define TLS_HANDSHAKE_TYPE_SERVER_HELLO 2
-#define TLS_HANDSHAKE_TYPE_CERT 0x0b
-#define TLS_HANDSHAKE_TYPE_SERVER_KEY_EXCHANGE 12
-#define TLS_HANDSHAKE_TYPE_CERT_REQ 13
-#define TLS_HANDSHAKE_TYPE_SERVER_HELLO_DONE 14
-#define TLS_HANDSHAKE_TYPE_CERT_VERIFY 15
-#define TLS_HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE 0x10
-#define TLS_HANDSHAKE_TYPE_FINISHED 0x14
 
+enum TLS_HANDSHAKE_TYPE {
+ TLS_HANDSHAKE_TYPE_HELLO_REQ = 0,
+ TLS_HANDSHAKE_TYPE_CLIENT_HELLO = 1,
+ TLS_HANDSHAKE_TYPE_SERVER_HELLO = 2,
+ TLS_HANDSHAKE_TYPE_CERT = 11,
+ TLS_HANDSHAKE_TYPE_SERVER_KEY_EXCHANGE = 12,
+ TLS_HANDSHAKE_TYPE_CERT_REQ = 13,
+ TLS_HANDSHAKE_TYPE_SERVER_HELLO_DONE = 14,
+ TLS_HANDSHAKE_TYPE_CERT_VERIFY = 15,
+ TLS_HANDSHAKE_TYPE_CLIENT_KEY_EXCHANGE = 16,
+ TLS_HANDSHAKE_TYPE_FINISHED = 20
+};
+
+
+
+const char* tls_handshake_type_name(uint8_t type);
 
 typedef struct {
     uint8_t msg_type;
@@ -135,7 +145,7 @@ typedef struct {
 } __attribute__((packed)) ClientCertificate;
 
 typedef struct {
-    uint8_t unknown0;
+    uint8_t prefix; // always 0x04
     TLS_KEY32 x;
     TLS_KEY32 y;
 } __attribute__((packed)) ClientKeyExchange;
