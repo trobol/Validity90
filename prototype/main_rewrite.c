@@ -25,6 +25,8 @@
 #include <openssl/ecdh.h>
 #include "constants.h"
 
+
+#include "sha256.h"
 #include "tls.h"
 
 #define xstr(a) str(a)
@@ -63,7 +65,7 @@ static libusb_device_handle * dev;
 int idProduct = 0;
 
 bool PRINT_IN_HEX = false;
-bool PRINT_OUT_HEX = true;
+bool PRINT_OUT_HEX = false;
 
 /*
  * UTILITIES
@@ -768,7 +770,7 @@ void make_keys(TLS_KEY32 client_random, TLS_KEY32 server_random) {
 
 
 
-void update_handshake_hash(SHA256_CTX* ctx, SHA256_CTX* ctx_dupe, byte* buf) {
+void update_handshake_hash(SHA256_STATE* ctx, byte* buf) {
     TLSPlaintext* msg = buf;
     if ( msg->type != TLS_PLAINTEXT_TYPE_HANDSHAKE) throw_error("expected message to be a handshake");
     
@@ -779,8 +781,7 @@ void update_handshake_hash(SHA256_CTX* ctx, SHA256_CTX* ctx_dupe, byte* buf) {
     
     while(handshake < end) {
         uint32_t length = (handshake->length[2] | ((uint32_t)handshake->length[1] << 8) | ((uint32_t)handshake->length[0] << 16)) + sizeof(Handshake);
-        if ( SHA256_Update(ctx, handshake, length) != 1) throw_error("failed to update hash");
-        if ( SHA256_Update(ctx_dupe, handshake, length) != 1) throw_error("failed to update hash");
+        sha256_update(ctx, handshake, length);
         printf("hashed block %hhu \n", handshake->msg_type);
         handshake = ((uint8_t*)handshake) + length;
     }
@@ -809,10 +810,8 @@ ServerHello get_server_hello(uint8_t* buf, int buf_len) {
 }
 
 void open_tls() {
-    SHA256_CTX* ctx;
-    SHA256_CTX* ctx_dupe;
-    SHA256_Init(ctx);
-    SHA256_Init(ctx_dupe);
+    SHA256_STATE sha_ctx;
+    sha256_init(&sha_ctx);
     
     g_secure_rx = false;
     g_secure_tx = false;
@@ -825,14 +824,14 @@ void open_tls() {
     build_client_hello(hello_msg, client_random);
 
     print_hex(hello_msg, TLS_CLIENT_HELLO_SIZE);
-    update_handshake_hash(ctx, ctx_dupe, hello_msg + 4);
+    update_handshake_hash(&sha_ctx, hello_msg + 4);
     
 
     int rsp_len;
     byte rsp[1024 * 1024];
 
     usb_cmd(hello_msg, TLS_CLIENT_HELLO_SIZE, rsp, 1024 * 1024, &rsp_len);
-    update_handshake_hash(ctx, ctx_dupe, rsp);
+    update_handshake_hash(&sha_ctx, rsp);
 
     ServerHello srv_hello = get_server_hello(rsp, rsp_len);
     parse_tls_response(rsp, rsp_len);
@@ -845,7 +844,7 @@ void open_tls() {
 
 
 
-    build_client_handshake(ctx, ctx_dupe, &handshake_buf, &handshake_buf_len, g_tls_cert, g_tls_cert_len, g_session_public.x, g_session_public.y, g_priv_key, g_master_secret, g_key_block.sign_key, g_key_block.encryption_key);
+    build_client_handshake(sha_ctx, &handshake_buf, &handshake_buf_len, g_tls_cert, g_tls_cert_len, g_session_public.x, g_session_public.y, g_priv_key, g_master_secret, g_key_block.sign_key, g_key_block.encryption_key);
 
     usb_cmd(handshake_buf, handshake_buf_len, rsp, 1024 * 1024, &rsp_len);
 
@@ -1032,12 +1031,21 @@ int main(int argc, char *argv[]) {
 
     //HASH_SHA256 hash = hmac_sha256("key", 3, "The quick brown fox jumps over the lazy dog", 43);
     //print_hex(hash.data, 32);
+    /*
     byte prf_out[0x30];
     byte prf_secret[32] = "01234567890123456789012345678901";
     byte prf_seed[64] = "0123456789012345678901234567890101234567890123456789012345678901";
     prf(prf_secret, 32, "hello", prf_seed, 64, prf_out, 0x30);
 
     print_hex(prf_out, 0x30);
+    */
+
+    SHA256_STATE state;
+    sha256_init(&state);
+    sha256_update(&state, "", 0);
+    SHA256_HASH hash = sha256_final(&state);
+    print_hex(hash.hash, 32);
+
 
     puts("Prototype version 15");
         loadBiosData();

@@ -14,9 +14,10 @@
 #include <string.h>
 #include <openssl/ssl.h>
 #include <openssl/tls1.h>
+#include "sha256.h"
 
-#define max(a,b) (a > b ? a : b)
-#define min(a,b) (a > b ? b : a)
+#define max(a,b) ((a) > (b) ? (a) : (b))
+#define min(a,b) ((a) > (b) ? (b) : (a))
 
 typedef struct {
     uint8_t data[32];
@@ -250,4 +251,4 @@ void Handshake_init(Handshake* out, uint8_t msg_type, uint32_t len);
 void build_client_hello(uint8_t* out, TLS_KEY32 client_random);
 void urandom(uint8_t* out, int len);
 
-void build_client_handshake(SHA256_CTX* ctx, SHA256_CTX* ctx_dupe, uint8_t** out, uint32_t* out_len, uint8_t* cert, uint8_t cert_len, TLS_KEY32 pub_x, TLS_KEY32 pub_y, EC_KEY* priv_key, uint8_t* master_secret, TLS_KEY32 sign_key, TLS_KEY32 encryption_key);
+void build_client_handshake(SHA256_STATE ctx, uint8_t** out, uint32_t* out_len, uint8_t* cert, uint8_t cert_len, TLS_KEY32 pub_x, TLS_KEY32 pub_y, EC_KEY* priv_key, uint8_t* master_secret, TLS_KEY32 sign_key, TLS_KEY32 encryption_key);

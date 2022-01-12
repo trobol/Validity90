@@ -1,7 +1,7 @@
 CFLAGS = -c -Wall -g -DG_LOG_DOMAIN=\"Validity90\"
 LDFLAGS = 
  
-SOURCES = validity90/utils.c validity90/validity90.c tls.c
+SOURCES = validity90/utils.c validity90/validity90.c tls.c sha256.c
 SOURCES_GTEST = test/rsp6-test.c test/utils-test.c
 
 HEADERS = constants.h validity90/validity90.h

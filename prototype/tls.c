@@ -1,5 +1,6 @@
+
 #include "tls.h"
-#include <openssl/sha.h>
+
 
 struct _TLS_MSG {
     uint8_t type; // TLS_PLAINTEXT_TYPE
@@ -26,6 +27,8 @@ struct _TLS_HNDSHK {
     Finished
     */
 };
+
+
 
 /*
 
@@ -159,14 +162,15 @@ void prf(uint8_t* secret, int secret_len, const char* label, uint8_t* seed, int 
     //puts(a + 32);
 
     hmac_sha256_raw(secret, secret_len, a + 32, label_len + seed_len, hash_buf, a);
-    puts("hashed secret");
-    print_hex(a, 32);
+
     
     for (uint32_t i = 0; i < len; i += 32) {
-        
+      
         hmac_sha256_raw(secret, secret_len, a, a_len, hash_buf, out_buf); // seed is a + seed
         hmac_sha256_raw(secret, secret_len, a, 32, hash_buf, a); // seed is a, replace a in "a + seed" buffer
+        
         memcpy(out + i, out_buf, min(32, len-i));
+        print_hex(out + i, min(32, len-i));
     }
 
     free(a);
@@ -242,8 +246,7 @@ void urandom(uint8_t* out, int len) {
     if (RAND_bytes(out, len) != 1) { puts("RAND_bytes failed"); exit(1); };
 }
 
-
-void build_client_handshake(SHA256_CTX* ctx, SHA256_CTX* ctx_dupe, uint8_t** out, uint32_t* out_len, uint8_t* cert, uint8_t cert_len, TLS_KEY32 pub_x, TLS_KEY32 pub_y, EC_KEY* priv_key, uint8_t* master_secret, TLS_KEY32 sign_key, TLS_KEY32 encryption_key) {
+void build_client_handshake(SHA256_STATE sha_ctx, uint8_t** out, uint32_t* out_len, uint8_t* cert, uint8_t cert_len, TLS_KEY32 pub_x, TLS_KEY32 pub_y, EC_KEY* priv_key, uint8_t* master_secret, TLS_KEY32 sign_key, TLS_KEY32 encryption_key) {
 
     uint32_t total_cert_len = cert_len;
     int ecda_size = ECDSA_size(priv_key);
@@ -282,27 +285,26 @@ void build_client_handshake(SHA256_CTX* ctx, SHA256_CTX* ctx_dupe, uint8_t** out
     msg_key_exchange->x = pub_x;
     msg_key_exchange->y = pub_y;
     
-    uint8_t cert_verify[SHA256_DIGEST_LENGTH];
-
-    SHA256_Update(ctx, hnd_cert, msg_cert_len + sizeof(Handshake));
-    SHA256_Update(ctx, hnd_key_exchange, msg_key_exchange_len + sizeof(Handshake));
-    SHA256_Final(cert_verify, ctx);
-
-    SHA256_Update(ctx_dupe, hnd_cert, msg_cert_len + sizeof(Handshake));
-    SHA256_Update(ctx_dupe, hnd_key_exchange, msg_key_exchange_len + sizeof(Handshake));
+    SHA256_HASH cert_verify;
+    sha256_update(&sha_ctx, hnd_cert, msg_cert_len + sizeof(Handshake));
+    sha256_update(&sha_ctx, hnd_key_exchange, msg_key_exchange_len + sizeof(Handshake));
+    {
+        SHA256_STATE sha_dupe = sha_ctx;
+        cert_verify = sha256_final(&sha_dupe);
+    }
 
     Handshake* hnd_cert_verify = hnd_key_exchange->body + msg_key_exchange_len;
    
     int sig_len;
-    if ( ECDSA_sign(0, cert_verify, SHA256_DIGEST_LENGTH, hnd_cert_verify->body, &sig_len, priv_key) != 1 ) { puts("failed to sign"); exit(1); }
+    if ( ECDSA_sign(0, cert_verify.hash, SHA256_DIGEST_LENGTH, hnd_cert_verify->body, &sig_len, priv_key) != 1 ) { puts("failed to sign"); exit(1); }
     Handshake_init(hnd_cert_verify, TLS_HANDSHAKE_TYPE_CERT_VERIFY, sig_len);
 
 
     TLSPlaintext_init(msg0, TLS_PLAINTEXT_TYPE_HANDSHAKE, first_msg_len - (ecda_size-sig_len));
-    printf("sig len: %i total sig: %i\n ", sig_len, ecda_size);
+    printf("sig len: %i total sig: %i\n", sig_len, ecda_size);
 
-    SHA256_Update(ctx_dupe, hnd_cert_verify, sig_len + sizeof(Handshake));
-    SHA256_Final(cert_verify, ctx_dupe);
+    sha256_update(&sha_ctx, hnd_cert_verify, sig_len + sizeof(Handshake));
+    cert_verify = sha256_final(&sha_ctx);
     
     TLSPlaintext* msg1 = hnd_cert_verify->body + sig_len;
     TLSPlaintext_init(msg1, TLS_PLAINTEXT_TYPE_CHANGE_CIPHER, sizeof(ChangeCipherSpec));
@@ -315,30 +317,34 @@ void build_client_handshake(SHA256_CTX* ctx, SHA256_CTX* ctx_dupe, uint8_t** out
     *out_len = max_buf_len - (ecda_size-sig_len);
 
     //*out_len = 4 + sizeof(TLSPlaintext) + first_msg_len + sizeof(TLSPlaintext) + sizeof(ChangeCipherSpec) - (ecda_size-sig_len);
-   
+
 
     uint8_t verify_data[12];
 
-    prf(master_secret, 0x30, "client finished", cert_verify, SHA256_DIGEST_LENGTH, verify_data, 12);
+    prf(master_secret, 0x30, "client finished", cert_verify.hash, SHA256_DIGEST_LENGTH, verify_data, 12);
 
+    // final handshake sections
+    // create "finished" 
+    // add hash of "finished" to end
+    // 
 
     uint8_t final_data_buf[64];
-    
 
     TLSPlaintext* buf_msg2 = final_data_buf;
     Handshake* buf_hnd_final = buf_msg2->fragment;
     TLSPlaintext_init(buf_msg2, TLS_PLAINTEXT_TYPE_HANDSHAKE, 12 + sizeof(Handshake));
     Handshake_init(buf_hnd_final, TLS_HANDSHAKE_TYPE_FINISHED, 12);
-    memcpy(verify_data, buf_hnd_final->body, 12);
+    memcpy(buf_hnd_final->body, verify_data, 12);
 
     //reverse(sign_key.data, 32);
     HASH_SHA256 sign_hmac = hmac_sha256(sign_key.data, 32, buf_msg2, sizeof(TLSPlaintext) + sizeof(Handshake) + 12);
     memcpy(buf_hnd_final->body + 12, sign_hmac.data, 32);
 
+    // pad bytes
     uint8_t* i = final_data_buf + 53;
     uint8_t* end = i + 11;
     for (; i < end; i++) {
-        *i = 10;
+        *i = 12;
     }
     print_hex(final_data_buf, 64);
 
@@ -352,9 +358,9 @@ void build_client_handshake(SHA256_CTX* ctx, SHA256_CTX* ctx_dupe, uint8_t** out
     //reverse(msg2->fragment, 16);
 
     EVP_CIPHER_CTX* ci_ctx = EVP_CIPHER_CTX_new();
-    if ( EVP_EncryptInit(ci_ctx, EVP_aes_256_cbc(), encryption_key.data, rand_vec) != 1) {puts("faild to encrpt"); exit(1);}
+    if ( EVP_EncryptInit(ci_ctx, EVP_aes_256_cbc(), encryption_key.data, rand_vec) != 1) { puts("failed to encrpt"); exit(1);}
     int outlenA, outlenB;
-    if ( EVP_EncryptUpdate(ci_ctx, msg2->fragment + 16, &outlenA, buf_msg2, 64) != 1) {puts("faild to encrpt"); exit(1);}
+    if ( EVP_EncryptUpdate(ci_ctx, msg2->fragment + 16, &outlenA, buf_msg2, 64) != 1) { puts("failed to encrpt"); exit(1);}
     //EVP_EncryptFinal(ci_ctx, msg2->fragment + 16 + outlenA, &outlenB);
     
     printf("outlenA : %i, outlenB: %i \n", outlenA, outlenB);
