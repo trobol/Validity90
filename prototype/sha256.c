@@ -44,12 +44,13 @@ void sha256_transform(SHA256_STATE* ctx, uint8_t* data) {
     
     uint32_t a, b, c, d, e, f, g, h;
     uint32_t w[64];
+    uint32_t i, j;
 
     // copy 16 4byte ints from data
-    for (uint32_t i = 0; i < 16; i++)
-        w[i] = (data[i] << 24) | (data[i + 1] << 16) | (data[i + 2] << 8) | (data[i + 3]);
+    for (i = 0, j = 0; i < 16; i++, j+=4)
+        w[i] = (data[j] << 24) | (data[j + 1] << 16) | (data[j + 2] << 8) | (data[j + 3]);
 
-    for (uint32_t i = 16; i < 64; i++) {
+    for (; i < 64; i++) {
         uint32_t s0 = ROTRIGHT(w[i-15], 7) ^ ROTRIGHT(w[i-15], 18) ^ (w[i-15] >> 3);
         uint32_t s1 = ROTRIGHT(w[i-2], 17) ^ ROTRIGHT(w[i-2], 19) ^ (w[i-2] >> 10);
         w[i] = w[i-16] + s0 + w[i-7] + s1;
