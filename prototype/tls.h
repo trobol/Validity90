@@ -251,4 +251,14 @@ void Handshake_init(Handshake* out, uint8_t msg_type, uint32_t len);
 void build_client_hello(uint8_t* out, TLS_KEY32 client_random);
 void urandom(uint8_t* out, int len);
 
-void build_client_handshake(SHA256_STATE ctx, uint8_t** out, uint32_t* out_len, uint8_t* cert, uint8_t cert_len, TLS_KEY32 pub_x, TLS_KEY32 pub_y, EC_KEY* priv_key, uint8_t* master_secret, TLS_KEY32 sign_key, TLS_KEY32 encryption_key);
+struct CLIENT_HANDSHAKE_INFO {
+    SHA256_STATE sha_ctx;
+    uint8_t* cert;
+    uint8_t cert_len;
+    TLS_KEY32 pub_x, pub_y;
+    uint8_t* master_secret;
+    TLS_KEY32 sign_key, encryption_key;
+    EC_KEY* priv_key;
+};
+
+void build_client_handshake(uint8_t** out, uint32_t* out_len,  struct CLIENT_HANDSHAKE_INFO info);

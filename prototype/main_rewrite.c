@@ -64,8 +64,8 @@ static libusb_device_handle * dev;
 
 int idProduct = 0;
 
-bool PRINT_IN_HEX = false;
-bool PRINT_OUT_HEX = false;
+bool PRINT_IN_HEX = true;
+bool PRINT_OUT_HEX = true;
 
 /*
  * UTILITIES
@@ -78,13 +78,13 @@ void throw_err_impl(const char* msg, unsigned int line) {
     exit(EXIT_FAILURE);
 }
 
-void print_hex_gn(byte* data, int len, int sz) {
+void print_hex_gn(byte* data, int len, int sz, int start) {
     for (int i = 0; i < len; i++) {
         if ((i % 16) == 0) {
             if (i != 0) {
                 printf("\n");
             }
-            printf("%04x ", i);
+            printf("%04x ", i + start);
         } else if ((i % 8) == 0) {
             printf(" ");
         }
@@ -93,12 +93,16 @@ void print_hex_gn(byte* data, int len, int sz) {
     puts("");
 }
 
+void print_hex_start(byte* data, int len, int start) {
+    print_hex_gn(data, len, 1, start);
+}
+
 void print_hex(byte* data, int len) {
-    print_hex_gn(data, len, 1);
+    print_hex_gn(data, len, 1, 0);
 }
 
 void print_hex_dw(dword* data, int len) {
-    print_hex_gn(data, len, 4);
+    print_hex_gn(data, len, 4, 0);
 }
 
 void res_err(int result, char* where) {
@@ -324,7 +328,7 @@ firmware_info* get_firmware_info() {
 void send_init() {
     byte rsp[1024 * 1024] = {};
     // these have something to do with hardware
-    assert_status(usb_cmd_byte(0x00, rsp, 1024*1024, NULL));
+    assert_status(usb_cmd_byte(0x01, rsp, 1024*1024, NULL));
     assert_status(usb_cmd_byte(0x19, rsp, 1024*1024, NULL));
 
     bool fw = has_firmware();
@@ -501,6 +505,7 @@ EC_KEY* g_priv_key;
 
 void parse_tls_priv(byte* body, int len) {
     puts("found priv block");
+    print_hex(body, len);
     
     struct tls_priv_info* info = body;
     if ( info->prefix != 2 ) throw_error("unknown private key prefix");
@@ -536,29 +541,51 @@ void parse_tls_priv(byte* body, int len) {
     puts(" d:");
     print_hex(d, 32);
 
+    for(int i = 95; i >= 0; i--) {
+        printf("%02x", x[i]);
+        if(i % 32 == 0) printf("\n");
+    }
+    
+
     // "Someone has reported that x and y are 0 after pairing with the latest windows driver."
     // so we are just gonna calculate the public keys
 
     // "Note that in [PKI-ALG] ... the secp256r1 curve was referred to as prime256v1." https://www.ietf.org/rfc/rfc5480.txt
     const EC_KEY* key = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+    /*
     const EC_GROUP* group = EC_KEY_get0_group(key);
-
-    const BN_CTX* bn_ctx = BN_CTX_new();
+    */
+    //const BN_CTX* bn_ctx = BN_CTX_new();
     const BIGNUM* prv = make_bignum(d);
-    const EC_POINT* pub = EC_POINT_new(group);
+    const BIGNUM* x_bn = make_bignum(x);
+    const BIGNUM* y_bn = make_bignum(y);
+    //const EC_POINT* pub = EC_POINT_new(group);
     
 
-    BN_CTX_start(bn_ctx);
-    EC_POINT_mul(group, pub, prv, NULL, NULL, bn_ctx);
+    //BN_CTX_start(bn_ctx);
+    //EC_POINT_mul(group, pub, prv, NULL, NULL, bn_ctx);
+    
+    if (EC_KEY_set_public_key_affine_coordinates(key, x_bn, y_bn) == 0) { puts("pub key failed"); exit(1); };
+    if (EC_KEY_set_private_key(key, prv) == 0) { puts("priv key failed"); exit(1); };
+    
+    
+    //EC_KEY_set_public_key(key, pub);
+    BIO * keybio = BIO_new(BIO_s_mem());
 
-
- 
-    EC_KEY_set_private_key(key, prv);
-    EC_KEY_set_public_key(key, pub);
+    
+    //EC_KEY_print(keybio, key, 0);
+     PEM_write_bio_ECPrivateKey(keybio, key, NULL, "", NULL, NULL, NULL);
+    char buffer [1024];
+    while(BIO_read (keybio, buffer, 1024) > 0) {
+        fputs(buffer, stdout);
+    }
+    puts("\n");
+    BIO_free(keybio);
 
     g_priv_key = key;
     
-    BN_CTX_free(bn_ctx);
+    //BN_CTX_free(bn_ctx);
+   
 
 
 }
@@ -652,6 +679,7 @@ void parse_tls_ecdh(byte* body, int len) {
 
 void parse_tls_cert(byte* body, int len) {
     puts("found cert block");
+    print_hex(body, len);
     // TODO: validate cert, check if pub keys match
     g_tls_cert = malloc(len);
     g_tls_cert_len = len;
@@ -723,6 +751,29 @@ void generate_keys() {
    
 }
 
+uint8_t char_to_byte(uint8_t b) {
+    uint8_t n = b - '0';
+    if (n <= 9)
+        return n;
+      
+    // to lower case
+    uint8_t c = (b | 0b100000) - 'a';
+    if (c <= 6)
+        return c + 10;
+
+    return 0;
+}
+
+void str_to_bytearray(uint8_t* input, uint8_t* out, int len) {
+    int i = 0;
+    int j = 0;
+    for(; i < len; i++, j += 2) {
+        out[i] = (char_to_byte(input[j]) << 4) | char_to_byte(input[j+1]);
+    } 
+}
+
+
+
 void make_keys(TLS_KEY32 client_random, TLS_KEY32 server_random) {
 
    
@@ -736,15 +787,30 @@ void make_keys(TLS_KEY32 client_random, TLS_KEY32 server_random) {
     BIGNUM* bn_x = BN_CTX_get(bn_ctx);
     BIGNUM* bn_y = BN_CTX_get(bn_ctx);
     EC_POINT* point = EC_KEY_get0_public_key(key);
-
+    
     if ( EC_POINT_get_affine_coordinates_GFp(group, point, bn_x, bn_y, bn_ctx) != 1)
         throw_error("failed to get coords");
 
     BN_bn2bin(bn_x, g_session_public.x.data);
+    //reverse(g_session_public.x.data, 32);
+
     BN_bn2bin(bn_y, g_session_public.y.data);
+    //reverse(g_session_public.y.data, 32);
+
     BN_CTX_end(bn_ctx);
 
+    puts("priv X:");
+    for (int i = 0; i < 32; i++)
+         printf("%02x", g_session_public.x.data[i]);
+
+    puts("\npriv Y:");
+    for (int i = 0; i < 32; i++)
+         printf("%02x", g_session_public.y.data[i]);
+    puts("\n");
+
     TLS_KEY32 pre_master_secret;
+
+    
     
 
     
@@ -761,7 +827,68 @@ void make_keys(TLS_KEY32 client_random, TLS_KEY32 server_random) {
 
     prf(g_master_secret, 0x30, "key expansion", seed, 64, &g_key_block, 0x120);
 
+    //g_key_block.encryption_key.data[6] = 50;
+    /*
+    puts("\nmaster secret");
+    for(int i = 0; i < 0x30; i++)
+        printf("%02x", g_master_secret[i]);
 
+    puts("\nsign key");
+    for(int i = 0; i < 0x20; i++)
+         printf("%02x", g_key_block.sign_key.data[i]);
+
+    puts("\nvalidation_key");
+    for(int i = 0; i < 0x20; i++)
+         printf("%02x", g_key_block.validation_key.data[i]);
+    */
+    puts("\nencryption_key");
+    for(int i = 0; i < 0x20; i++)
+         printf("%02x", g_key_block.encryption_key.data[i]);
+    
+    puts("\ndecryption_key");
+    for(int i = 0; i < 0x20; i++)
+         printf("%02x", g_key_block.decryption_key.data[i]);
+
+    puts("\n");
+    
+
+   /*
+     x
+    02eab4c197b5658865e2dbe2dfbd85fa44440a963ba88ac2b7ad0ebd29fe3825
+    y
+    c6d44313cf01bc6431126be5ac530b2117d9b27bf29b9dc2c9663cc84324230b
+    master secret
+    26e85cf58aef75b7fc7d063bf5d4ab9e601f26a9d80a672b07570e227222df4d1784a53961d77c8a8d77b9cbc74a7042
+    sign key
+    01e2f5befb4c2ed7b2a7f4dd163f79998cf5200a591de4c5f543ebeeea5593d2
+    validation_key
+    bd9359ca94def05848c0cd1db6ebc93e9154ec7b91e0b8891b61b1b0037deb06
+    encryption_key
+    d7929a850d915c324860b3e2a89b45ae516c8fcb053a32b4d7d89de1ebaf1018
+    decryption_key
+    6ea8769fcd708224f22e36a36d6d4a45754235098a11467bef2c9262aac43bba
+    
+
+   */
+
+    
+  /*
+    str_to_bytearray("02eab4c197b5658865e2dbe2dfbd85fa44440a963ba88ac2b7ad0ebd29fe3825",  g_session_public.x.data, 32);
+
+    str_to_bytearray("c6d44313cf01bc6431126be5ac530b2117d9b27bf29b9dc2c9663cc84324230b", g_session_public.y.data, 32);
+
+    str_to_bytearray("26e85cf58aef75b7fc7d063bf5d4ab9e601f26a9d80a672b07570e227222df4d1784a53961d77c8a8d77b9cbc74a7042", g_master_secret, 48);
+
+    str_to_bytearray("01e2f5befb4c2ed7b2a7f4dd163f79998cf5200a591de4c5f543ebeeea5593d2", g_key_block.sign_key.data, 32);
+
+    str_to_bytearray("bd9359ca94def05848c0cd1db6ebc93e9154ec7b91e0b8891b61b1b0037deb06", g_key_block.validation_key.data, 32);
+
+    str_to_bytearray("d7929a850d915c324860b3e2a89b45ae516c8fcb053a32b4d7d89de1ebaf1018", g_key_block.encryption_key.data, 32);
+
+    str_to_bytearray("6ea8769fcd708224f22e36a36d6d4a45754235098a11467bef2c9262aac43bba", g_key_block.decryption_key.data, 32);
+    */
+    puts("session X");
+    print_hex(g_session_public.x.data, 32);
     
     EC_KEY_free(key);
     EC_POINT_free(peer_pub_key);
@@ -782,7 +909,7 @@ void update_handshake_hash(SHA256_STATE* ctx, byte* buf) {
     while(handshake < end) {
         uint32_t length = (handshake->length[2] | ((uint32_t)handshake->length[1] << 8) | ((uint32_t)handshake->length[0] << 16)) + sizeof(Handshake);
         sha256_update(ctx, handshake, length);
-        printf("hashed block %hhu \n", handshake->msg_type);
+        printf("hashed block %hhu %u bytes \n", handshake->msg_type, length);
         handshake = ((uint8_t*)handshake) + length;
     }
 }
@@ -805,6 +932,10 @@ ServerHello get_server_hello(uint8_t* buf, int buf_len) {
 
     if ( hello->compression_method != 0 )
         throw_error("server selected to enable compression, which we don't support");
+    
+
+    //str_to_bytearray("020a99ae7839b78701fb89c8167501d7bcaafc5eec1bd278d32f498ad928e167", hello->random.data, 32);
+    //str_to_bytearray("07544c537839b787", &hello->session_id, 8);
 
     return *hello;
 }
@@ -820,21 +951,33 @@ void open_tls() {
     byte hello_msg[TLS_CLIENT_HELLO_SIZE];
 
     TLS_KEY32 client_random;
+    
+    //str_to_bytearray("d4a67e048b0d4af243f5a68814db510a870e92779c1b26c748b739f46ee7a05f", client_random.data, 32);
     urandom(client_random.data, 32);
     build_client_hello(hello_msg, client_random);
 
     print_hex(hello_msg, TLS_CLIENT_HELLO_SIZE);
     update_handshake_hash(&sha_ctx, hello_msg + 4);
     
+   
 
     int rsp_len;
     byte rsp[1024 * 1024];
 
+    puts("TLS HELLO");
     usb_cmd(hello_msg, TLS_CLIENT_HELLO_SIZE, rsp, 1024 * 1024, &rsp_len);
+    ServerHello srv_hello = get_server_hello(rsp, rsp_len);
     update_handshake_hash(&sha_ctx, rsp);
 
-    ServerHello srv_hello = get_server_hello(rsp, rsp_len);
+    
+
+
+    
+
+    
     parse_tls_response(rsp, rsp_len);
+
+    print_hex(rsp, rsp_len);
 
     make_keys(client_random, srv_hello.random);
 
@@ -843,8 +986,19 @@ void open_tls() {
     int handshake_buf_len;
 
 
+    struct CLIENT_HANDSHAKE_INFO info;
+    info.sha_ctx = sha_ctx;
+    info.cert = g_tls_cert;
+    info.cert_len = g_tls_cert_len;
+    info.pub_x = g_session_public.x;
+    info.pub_y = g_session_public.y;
+    info.priv_key = g_priv_key;
+    info.master_secret = g_master_secret;
+    info.sign_key = g_key_block.sign_key;
+    info.encryption_key = g_key_block.encryption_key;   
 
-    build_client_handshake(sha_ctx, &handshake_buf, &handshake_buf_len, g_tls_cert, g_tls_cert_len, g_session_public.x, g_session_public.y, g_priv_key, g_master_secret, g_key_block.sign_key, g_key_block.encryption_key);
+
+    build_client_handshake(&handshake_buf, &handshake_buf_len, info);
 
     usb_cmd(handshake_buf, handshake_buf_len, rsp, 1024 * 1024, &rsp_len);
 
@@ -900,7 +1054,7 @@ void handle_handshake(byte* data, word data_len) {
         case 0x14:
             handle_finish(packet->data, size);
             break;
-        case 0x02:
+        case 0x02: // hello
             break;
         default:
             printf("unknown handshake packet: %x\n", packet->type);
@@ -1039,6 +1193,9 @@ int main(int argc, char *argv[]) {
 
     print_hex(prf_out, 0x30);
     */
+
+
+
 
     SHA256_STATE state;
     sha256_init(&state);
