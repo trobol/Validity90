@@ -1,5 +1,22 @@
 # Validity90
 
+
+# State of this fork
+
+First: it is not finishied and I have run into a substantial issue that I cannot seem to solve
+
+I attempted to properly connect to the sensor instead of using hard codded buffers of data. Most of the work was done by the makers of [python-validity](https://github.com/uunicorn/python-validity) and this was mostly rewriting it in C.
+
+
+I have managed to get all the way up to the final packet of the connection handshake, but then I recive the error code that the spec defines as "Bad HMAC".
+I have verified all the previous packets, I have rewritted and verified the hashing and encryption algorithms and tried every debugging avenue that I can think of. 
+
+My work is in prototype/main_rewrite.c, prototype/tls.c and prototype/tls.h, they can be built using Makefile/prototype.
+
+If you do make any progress or figure out anything please open an issue.
+
+# Rest of original readme
+
 This project aims on reverse engineering protocol of Validity 138a:0090, 138a:0094, 138a:0097, 06cb:0081, 06cb:009a fingerprint readers, creating specification and FLOSS libfprint driver.
 
 ## Discussions
